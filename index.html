@@ -5098,11 +5098,9 @@
                 if (isIOS || /Safari/i.test(navigator.userAgent)) {
                     console.log('🍎 iOS/Safari - suche Weitwinkel');
                     
+                    // Scanner: normale Hauptkamera (kein Ultraweitwinkel, keine Dual/Triple-Kamera)
                     const priorities = [
-                        /back ultra wide/i,
-                        /back wide/i,
-                        /back camera$/i,
-                        /back|rear|environment|rück|haupt/i
+                        /^(back camera|rückseitige kamera|rückkamera)$/i
                     ];
                     
                     for (const pattern of priorities) {
@@ -5116,7 +5114,7 @@
                 } else {
                     // Android/Desktop: Back Camera
                     const backCamera = videoInputDevices.find(device => 
-                        /back|rear|environment|rück|haupt/i.test(device.label)
+                        /back|rear|environment|rück|haupt/i.test(device.label) && !/ultra|dual|triple|tele|wide|weitwinkel/i.test(device.label)
                     );
                     
                     if (backCamera) {
@@ -5126,6 +5124,10 @@
                 }
 
                 // Fallback
+                if (!selectedDeviceId) {
+                    const plain = videoInputDevices.find(d => /back|rear|environment|rück|haupt/i.test(d.label) && !/ultra|dual|triple|tele|wide|weitwinkel/i.test(d.label));
+                    if (plain) selectedDeviceId = plain.deviceId;
+                }
                 if (!selectedDeviceId && videoInputDevices.length > 0) {
                     selectedDeviceId = videoInputDevices[videoInputDevices.length - 1]?.deviceId;
                     console.log('⚠️ Fallback Scanner-Kamera:', videoInputDevices[videoInputDevices.length - 1]?.label);
@@ -5167,7 +5169,7 @@
                     
                     if (capabilities.zoom) {
                         await videoTrack.applyConstraints({
-                            advanced: [{ zoom: capabilities.zoom.min || 1.0 }]
+                            advanced: [{ zoom: Math.min(Math.max(1, capabilities.zoom.min), capabilities.zoom.max) }]
                         });
                         console.log('✅ Zoom zurückgesetzt auf:', capabilities.zoom.min);
                     }
@@ -5295,7 +5297,7 @@
                     
                     if (capabilities.zoom) {
                         await videoTrack.applyConstraints({
-                            advanced: [{ zoom: capabilities.zoom.min || 1.0 }]
+                            advanced: [{ zoom: Math.min(Math.max(1, capabilities.zoom.min), capabilities.zoom.max) }]
                         });
                     }
                 } catch (error) {

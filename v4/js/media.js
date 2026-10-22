@@ -28,6 +28,22 @@ const Media = (() => {
     return ov;
   }
 
+  /* Kamera für den Scanner: die normale Hauptkamera (1×).
+     Virtuelle Mehrfach-Kameras (Dual/Triple) springen auf dem iPhone bei kurzem Abstand
+     selbstständig in den Ultraweitwinkel – die werden darum gemieden. */
+  const SCAN_MAIN = /^(back camera|rear camera|rückseitige kamera|rückkamera|kamera auf der rückseite)$/i;
+  const SCAN_BACK = /back|rear|environment|rück|haupt|facing back/i;
+  const SCAN_AVOID = /ultra|dual|triple|tele|weitwinkel|wide|makro|macro|depth|tiefe/i;
+  function pickScanCam(devs) {
+    let saved = null; try { saved = localStorage.getItem('fw4.scanCam'); } catch (e) {}
+    return (saved && devs.find(d => d.label === saved)) ||
+      devs.find(d => SCAN_MAIN.test(d.label.trim())) ||
+      devs.find(d => SCAN_BACK.test(d.label) && !SCAN_AVOID.test(d.label)) ||
+      devs.find(d => SCAN_BACK.test(d.label)) || devs[devs.length - 1] || null;
+  }
+  const videoInputs = async () => (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  const RES = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+
   /* Scannt einen Code und liefert den Text (oder null bei Abbruch) */
   function scan() {
     return new Promise(async (resolve) => {
@@ -36,32 +52,57 @@ const Media = (() => {
         <p class="cam-msg">Kamera wird gestartet…</p>
         <div class="cam-actions"><button class="btn ghost light" data-switch hidden>Kamera wechseln</button></div>`);
       const video = ov.querySelector('video'), msg = ov.querySelector('.cam-msg');
-      let reader = null, devices = [], devId, finished = false;
-      const finish = (v) => { if (finished) return; finished = true; try { reader && reader.reset(); } catch (e) {} ov.remove(); resolve(v); };
+      let reader = null, stream = null, finished = false, cams = [], cur = null;
+      const stopStream = () => { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; };
+      const finish = (v) => { if (finished) return; finished = true; try { reader && reader.reset(); } catch (e) {} stopStream(); ov.remove(); resolve(v); };
       ov.querySelector('[data-x]').onclick = () => finish(null);
+
+      async function open(constraints) {
+        stopStream();
+        stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+        const track = stream.getVideoTracks()[0];
+        try {
+          const cap = track.getCapabilities ? track.getCapabilities() : {};
+          const adv = [];
+          if (cap.focusMode && cap.focusMode.includes('continuous')) adv.push({ focusMode: 'continuous' });
+          // Zoom auf 1× – nicht auf das Minimum (das wäre bei Mehrfach-Kameras 0,5× = Weitwinkel)
+          if (cap.zoom && cap.zoom.min <= 1 && cap.zoom.max >= 1) adv.push({ zoom: 1 });
+          if (adv.length) await track.applyConstraints({ advanced: adv });
+        } catch (e) {}
+        return track;
+      }
+      async function decode() {
+        try { reader.reset(); } catch (e) {}
+        if (finished) return stopStream();
+        reader.decodeFromStream(stream, video, (res) => {
+          if (res && !finished) { if (navigator.vibrate) navigator.vibrate(80); finish(res.getText()); }
+        }).catch(() => {});
+      }
+
       try {
         await loadZXing();
         reader = new ZXing.BrowserMultiFormatReader();
-        devices = await reader.listVideoInputDevices();
-        devId = pickBack(devices);
-        const start = async () => {
-          const ctl = await reader.decodeFromVideoDevice(devId || null, video, (res) => {
-            if (res && !finished) { if (navigator.vibrate) navigator.vibrate(80); finish(res.getText()); }
-          });
-          try {
-            const track = (ctl && ctl.stream ? ctl.stream : video.srcObject).getVideoTracks()[0];
-            const cap = track.getCapabilities ? track.getCapabilities() : {};
-            const adv = [];
-            if (cap.zoom) adv.push({ zoom: cap.zoom.min || 1 });
-            if (cap.focusMode && cap.focusMode.includes('continuous')) adv.push({ focusMode: 'continuous' });
-            if (adv.length) await track.applyConstraints({ advanced: adv });
-          } catch (e) {}
-          msg.textContent = 'Code mittig in den Rahmen halten';
-        };
-        await start();
-        if (devices.length > 1) {
+        // 1. Rückkamera öffnen (holt die Erlaubnis, danach sind die Kameranamen lesbar)
+        let track = await open({ facingMode: { ideal: 'environment' }, ...RES });
+        // 2. Hauptkamera suchen und ggf. umschalten
+        cams = await videoInputs();
+        cur = pickScanCam(cams);
+        const active = track.getSettings ? track.getSettings().deviceId : null;
+        if (cur && cur.deviceId && cur.deviceId !== active) track = await open({ deviceId: { exact: cur.deviceId }, ...RES });
+        else if (!cur) cur = cams.find(d => d.deviceId === active) || null;
+        await decode();
+        msg.textContent = 'Code mittig in den Rahmen halten (ca. 15–25 cm Abstand)';
+        const back = cams.filter(d => SCAN_BACK.test(d.label));
+        const list = back.length > 1 ? back : cams;
+        if (list.length > 1) {
           const sw = ov.querySelector('[data-switch]'); sw.hidden = false;
-          sw.onclick = async () => { const i = devices.findIndex(d => d.deviceId === devId); devId = devices[(i + 1) % devices.length].deviceId; reader.reset(); await start(); };
+          sw.onclick = async () => {
+            const i = list.findIndex(d => cur && d.deviceId === cur.deviceId);
+            cur = list[(i + 1) % list.length];
+            try { localStorage.setItem('fw4.scanCam', cur.label); } catch (e) {}
+            try { await open({ deviceId: { exact: cur.deviceId }, ...RES }); await decode(); msg.textContent = cur.label || 'Kamera gewechselt'; }
+            catch (e) { msg.textContent = 'Diese Kamera lässt sich nicht öffnen.'; }
+          };
         }
       } catch (e) {
         msg.textContent = e.name === 'NotAllowedError' ? 'Kamerazugriff wurde verweigert. In den Einstellungen erlauben.' : (e.message || 'Kamera nicht verfügbar.');
