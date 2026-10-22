@@ -1,5 +1,5 @@
 /* Offline-Betrieb: App-Dateien vorab cachen; Netzwerk zuerst, sonst Cache. */
-const CACHE = 'fw-recorder-v4.0.1';
+const CACHE = 'fw-recorder-v4.1.0';
 const FILES = ['./', 'index.html', 'manifest.webmanifest',
   'js/layout.js', 'js/db.js', 'js/annotate.js', 'js/media.js', 'js/export.js', 'js/app.js',
   'lib/pptxgen.bundle.js',

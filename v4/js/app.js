@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '4.0.1';
+const VERSION = '4.1.0';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -157,6 +157,9 @@ async function route() {
         renderStep();
       } else if (h[2] === 'folien') { S.route = { view: 'slides', id: p.id }; renderSlides(); }
       else { S.route = { view: 'project', id: p.id }; renderProject(); }
+    } else if (h[0] === 'cad') {
+      await flush(); S.P = null; dropThumbs();
+      S.route = { view: 'cad' }; await renderCad();
     } else {
       await flush(); S.P = null; dropThumbs();
       S.route = { view: 'home' }; await renderHome();
@@ -166,6 +169,54 @@ async function route() {
 }
 
 /* ================= Startseite ================= */
+function homeTabs(active) {
+  return `<div class="seg" role="tablist" style="margin-bottom:14px">
+    <button role="tab" class="${active === 'home' ? 'on' : ''}" data-act="nav-home">📋 Meine Anleitungen</button>
+    <button role="tab" class="${active === 'cad' ? 'on' : ''}" data-act="nav-cad">🧊 Aus CAD erstellen</button></div>`;
+}
+
+/* ================= Reiter „Aus CAD erstellen“ ================= */
+let cadModule = null;
+async function renderCad() {
+  $('#app').innerHTML = `
+  <header class="top"><div class="top-in"><div class="brandbar"><img src="img/logo.png" alt="funkwerk"><span>Montage-Recorder</span></div></div></header>
+  <main class="wrap" style="max-width:1440px">
+    <div style="max-width:760px">${homeTabs('cad')}</div>
+    <div id="cad-root"><div class="empty"><span class="spin" style="display:inline-block"></span><br>Wird geladen…</div></div>
+  </main>`;
+  try {
+    if (!cadModule) cadModule = await import('./cad.js');
+    if (S.route.view !== 'cad') return;
+    cadModule.mount($('#cad-root'), { toast, busy, projectForm: async (v, title, cta) => { S.projects = await DB.allProjects(); return projectForm(v, title, cta); }, createFromCad });
+  } catch (e) {
+    console.error(e);
+    $('#cad-root').innerHTML = `<div class="banner">Der CAD-Reiter konnte nicht geladen werden (${esc(e.message)}). Beim ersten Öffnen wird eine Internetverbindung benötigt.</div>`;
+  }
+}
+/* Ergebnis aus dem CAD-Reiter als normale Anleitung anlegen */
+async function createFromCad(info, cadSteps) {
+  const now = Date.now();
+  const p = { id: uid(), ...info, createdAt: now, updatedAt: now, createdAtText: new Date(now).toLocaleString('de-DE'), steps: [], v: 4, source: 'cad' };
+  for (const c of cadSteps) {
+    const s = emptyStep();
+    s.title = c.title || '';
+    s.instructions = c.instructions || '';
+    s.warning = c.warning || '';
+    s.materials = (c.materials || []).map(m => ({ number: m.number, description: m.description || '', quantity: m.quantity || 1 }));
+    s.tools = c.tools || [];
+    if (c.image) {
+      const { img, url } = await loadImage(c.image.blob);
+      const th = await scaleTo(img, 560, 0.78); URL.revokeObjectURL(url);
+      const rec = { id: uid(), projectId: p.id, blob: c.image.blob, thumb: th.blob, w: c.image.w, h: c.image.h, createdAt: new Date().toISOString() };
+      await DB.putPhoto(rec); s.photoIds.push(rec.id);
+    }
+    p.steps.push(s);
+  }
+  await DB.putProject(p);
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  toast('Anleitung angelegt: ' + p.steps.length + ' Schritte');
+  go(`#/p/${p.id}`);
+}
 async function renderHome() {
   S.projects = (await DB.allProjects()).filter(p => !p.hidden && !S.pending.has(p.id)).sort((a, b) => b.updatedAt - a.updatedAt);
   const firstThumb = async p => { const s = p.steps.find(s => s.photoIds.length); if (!s) return ''; const ph = await DB.getPhoto(s.photoIds[0]); return ph ? URL.createObjectURL(ph.thumb || ph.blob) : ''; };
@@ -176,6 +227,7 @@ async function renderHome() {
   $('#app').innerHTML = `
   <header class="top"><div class="top-in"><div class="brandbar"><img src="img/logo.png" alt="funkwerk"><span>Montage-Recorder</span></div></div></header>
   <main class="wrap">
+    ${homeTabs('home')}
     ${leg ? `<div class="banner info" style="margin-bottom:14px"><b>Aufnahme aus der alten Version gefunden</b><br>
       <span class="small">${esc([leg.state.projectInfo?.customer, leg.state.projectInfo?.product, leg.state.projectInfo?.variant].filter(Boolean).join(' · ') || 'Ohne Angaben')} – ${leg.count} Schritt(e). Sie bleibt in der alten Version erhalten.</span>
       <div class="row" style="margin-top:10px"><button class="btn primary sm" data-act="legacy-import">Übernehmen</button><button class="btn ghost sm" data-act="legacy-hide">Ausblenden</button></div></div>` : ''}
@@ -707,6 +759,8 @@ document.addEventListener('click', async e => {
     case 'legacy-import': return importLegacy();
     case 'legacy-hide': localStorage.setItem('fw4.legacyDone', '1'); S.legacy = null; return renderHome();
     case 'home': return go('#/');
+    case 'nav-home': return go('#/');
+    case 'nav-cad': return go('#/cad');
     case 'back-project': case 'done': return go(`#/p/${S.P.id}`);
     case 'step': return go(`#/p/${S.P.id}/s/${id}/material`);
     case 'up': return moveStep(id, -1);
