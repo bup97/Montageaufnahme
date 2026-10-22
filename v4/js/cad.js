@@ -11,6 +11,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<'
 const rid = () => Math.random().toString(36).slice(2, 9);
 
 const ACCENT = '#e8590c';   // neue Teile im Schritt
+const ARROW = '#1971c2';    // Montagepfeil (blau, gut unterscheidbar von Orange und Grau)
 let API = null;             // vom Recorder übergeben: toast, busy, createFromCad, projectForm
 let ROOT = null;
 
@@ -389,7 +390,7 @@ function initThree() {
     newGhost: new THREE.MeshBasicMaterial({ color: 0xe8590c, transparent: true, opacity: 0.18, depthWrite: false }),
     ghost: new THREE.MeshBasicMaterial({ color: 0x8a96a3, transparent: true, opacity: 0.08, depthWrite: false }),
   };
-  arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ACCENT), roughness: 0.5, emissive: 0x2a0d00 });
+  arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ARROW), roughness: 0.45, emissive: 0x06223f });
   renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
   renderer.domElement.addEventListener('pointerup', onPick);
   offRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -672,7 +673,7 @@ function renderWork() {
           <button class="cad-tg" data-cad="camauto">Auto</button>
         </div>
       </div>
-      <div class="cad-legend"><i style="background:${ACCENT}"></i>neu im Schritt<i style="background:#a9b1ba"></i>bereits montiert</div>
+      <div class="cad-legend"><i style="background:${ACCENT}"></i>neu im Schritt<i style="background:#a9b1ba"></i>bereits montiert<i style="background:${ARROW}"></i>Montagerichtung</div>
       <div class="cad-nav"><button data-cad="prev" aria-label="Vorheriger Schritt">‹</button><span id="cad-pos"></span><button data-cad="next" aria-label="Nächster Schritt">›</button></div>
       <div class="cad-pick" id="cad-pick" hidden></div>
     </div>
