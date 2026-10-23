@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '4.1.0';
+const VERSION = '5.0.0';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -204,6 +204,7 @@ async function createFromCad(info, cadSteps) {
     s.warning = c.warning || '';
     s.materials = (c.materials || []).map(m => ({ number: m.number, description: m.description || '', quantity: m.quantity || 1 }));
     s.tools = c.tools || [];
+    s.cables = c.cables || [];
     if (c.image) {
       const { img, url } = await loadImage(c.image.blob);
       const th = await scaleTo(img, 560, 0.78); URL.revokeObjectURL(url);

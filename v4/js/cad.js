@@ -3,6 +3,7 @@
    Läuft komplett im Browser; schwere Berechnung im Web Worker (cad/worker.js). */
 import * as THREE from '../lib/three.module.min.js';
 import { OrbitControls } from '../lib/OrbitControls.js';
+import { parseSchematic, endLabel, shortBmk, colorName } from './elec.js';
 
 const CAD_BASE = new URL('../cad/', import.meta.url).href;
 const $ = (s, r = document) => r.querySelector(s);
@@ -319,6 +320,7 @@ function toolsFor(label) {
   return t;
 }
 function genText(si) {
+  if (S.steps[si].kind === 'wire') return genWireText(S.steps[si]);
   const st = S.steps[si]; const groups = stepGroups(st);
   const dirW = st.dir >= 0 ? DIRWORD[S.meta.upAxis][st.dir] : '';
   const tgt = targetOf(si) || 'Baugruppe';
@@ -389,6 +391,9 @@ function initThree() {
     newp: new THREE.MeshStandardMaterial({ color: 0xe8590c, metalness: 0.05, roughness: 0.5, emissive: 0x3a1200 }),
     newGhost: new THREE.MeshBasicMaterial({ color: 0xe8590c, transparent: true, opacity: 0.18, depthWrite: false }),
     ghost: new THREE.MeshBasicMaterial({ color: 0x8a96a3, transparent: true, opacity: 0.08, depthWrite: false }),
+    src: new THREE.MeshStandardMaterial({ color: 0x2f9e44, metalness: 0.05, roughness: 0.5, emissive: 0x0b2a12 }),
+    dst: new THREE.MeshStandardMaterial({ color: 0x1971c2, metalness: 0.05, roughness: 0.5, emissive: 0x061a33 }),
+    dim: new THREE.MeshStandardMaterial({ color: 0xc9cfd6, metalness: 0.1, roughness: 0.7, transparent: true, opacity: 0.55, depthWrite: false }),
   };
   arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ARROW), roughness: 0.45, emissive: 0x06223f });
   renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
@@ -457,6 +462,8 @@ function makeArrow(from, dir, len) {
 }
 function applyStep(si) {
   const st = S.steps[si]; if (!st) return;
+  clearWires();
+  if (st.kind === 'wire') { arrowGroup.clear(); st._box = applyWireStep(st); needRender = true; return; }
   const placed = placedBefore(si); const now = new Set(st.parts);
   const off = explodeOffset(si);
   const baseIds = new Set(S.steps[0]?.parts || []);
@@ -477,6 +484,12 @@ function applyStep(si) {
 }
 function autoCam(si, cam, aspect) {
   const st = S.steps[si];
+  if (st.kind === 'wire') {
+    const bx = (st._box && !st._box.isEmpty()) ? st._box.clone() : modelBox.clone();
+    const sph = bx.getBoundingSphere(new THREE.Sphere()); const r = Math.max(sph.radius * 1.15, modelBox.getSize(new THREE.Vector3()).length() * 0.22);
+    const fov = cam.fov * Math.PI / 180; const fit = Math.min(fov, 2 * Math.atan(Math.tan(fov / 2) * aspect)); const dist = r / Math.sin(fit / 2) * 1.05;
+    return { p: sph.center.clone().add(isoDir().multiplyScalar(dist)).toArray(), t: sph.center.toArray(), near: dist / 100, far: dist * 20 };
+  }
   const b = st.kind === 'base' ? modelBox.clone() : partsBox(st.parts);
   const off = explodeOffset(si); if (off) { const nb = partsBox(st.parts); nb.translate(off); b.union(nb); }
   const minR = modelBox.getSize(new THREE.Vector3()).length() * 0.09;
@@ -509,6 +522,14 @@ function onPick(e) {
   const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
   const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
   const hit = rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.ghost), false)[0];
+  if (pickMode) {
+    if (!hit) return;
+    const E = elecInit(); const b = pickMode.bmk;
+    if (pickMode.mode === 'marker') E.map[b] = { type: 'marker', p: hit.point.toArray() };
+    else E.map[b] = { type: 'part', ids: [hit.object.userData.id] };
+    toast(shortBmk(b) + (pickMode.mode === 'marker' ? ': Position gesetzt' : ' → ' + labelOf(S.parts[hit.object.userData.id])));
+    pickMode = null; updateUse(); regenTexts(); renderIns(); showStep(S.sel); thumbs.clear(); scheduleThumbs(); return;
+  }
   const box = $('#cad-pick', ROOT); if (!box) return;
   if (!hit) { box.hidden = true; return; }
   const id = hit.object.userData.id; const p = S.parts[id]; const b = bomOf(p);
@@ -572,6 +593,10 @@ const STYLE = `
 .cad-maptab td:first-child{overflow-wrap:anywhere}
 .cad-maptab select{min-height:38px;padding:5px 6px;font-size:13px}
 .cad-dirsel{min-height:40px;padding:6px 8px}
+.el-tab input.el-in{min-height:32px;padding:4px 6px;font-size:12.5px;width:100%;min-width:70px}
+.el-tab input[type=checkbox]{width:18px;height:18px;min-height:0}
+.el-tab tr.off td{opacity:.5}
+.chip.scan{background:#fff6bf;color:#6b5a00}
 @media(max-width:1180px){.cad-work{grid-template-columns:260px minmax(0,1fr)}.cad-work .cad-ins{grid-column:1/-1}}
 @media(max-width:760px){.cad-work{display:flex;flex-direction:column}.cad-viewer{height:52vh;width:100%}.cad-list{max-height:none}.cad-legend{display:none}.cad-work>*{width:100%}}
 `;
@@ -638,6 +663,7 @@ function renderStart() {
 }
 
 function kindChip(st) {
+  if (st.kind === 'wire') return '<span class="chip scan">⚡ Elektro</span>';
   return st.kind === 'base' ? '<span class="chip">Grundteil</span>' : st.kind === 'sub' ? '<span class="chip warn">Vormontage</span>' : st.kind === 'fast' ? '<span class="chip brand">Verbindung</span>' : '';
 }
 function mapStatus() {
@@ -660,7 +686,7 @@ function renderWork() {
     <div class="cad-list" id="cad-list">${S.steps.map((s, i) => `
       <div class="cad-step ${i === S.sel ? 'sel' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
         <span class="num">${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
-        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}</div></div>
+        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
       </div>`).join('')}</div>
     <div class="cad-viewer" id="cad-viewer">
@@ -678,7 +704,7 @@ function renderWork() {
       <div class="cad-pick" id="cad-pick" hidden></div>
     </div>
     <div class="cad-ins">
-      <div class="seg" style="margin-bottom:10px"><button class="${insTab === 'step' ? 'on' : ''}" data-cad="ins:step">Schritt</button><button class="${insTab === 'map' ? 'on' : ''}" data-cad="ins:map">Zuordnung${S.bom && st.unmatched ? ' <span class="n" style="background:var(--warn)">!</span>' : ''}</button><button class="${insTab === 'opt' ? 'on' : ''}" data-cad="ins:opt">Optionen</button></div>
+      <div class="seg" style="margin-bottom:10px"><button class="${insTab === 'step' ? 'on' : ''}" data-cad="ins:step">Schritt</button><button class="${insTab === 'map' ? 'on' : ''}" data-cad="ins:map">Zuordnung${S.bom && st.unmatched ? ' <span class="n" style="background:var(--warn)">!</span>' : ''}</button><button class="${insTab === 'elec' ? 'on' : ''}" data-cad="ins:elec">⚡ Elektro</button><button class="${insTab === 'opt' ? 'on' : ''}" data-cad="ins:opt">Optionen</button></div>
       <div id="cad-ins"></div>
     </div>
   </div>
@@ -698,9 +724,11 @@ function renderIns() {
   const el = $('#cad-ins', ROOT); if (!el) return;
   if (insTab === 'map') return renderMap(el);
   if (insTab === 'opt') return renderOpt(el);
+  if (insTab === 'elec') return renderElec(el);
   const st = S.steps[S.sel]; if (!st) { el.innerHTML = ''; return; }
+  if (st.kind === 'wire') return renderWireIns(el, st);
   const groups = stepGroups(st);
-  const stepOpts = S.steps.map((s, i) => `<option value="${i}" ${i === S.sel ? 'selected' : ''}>Schritt ${i + 1}</option>`).join('') + '<option value="new">→ eigener Schritt</option>';
+  const stepOpts = S.steps.map((s, i) => s.kind === 'wire' ? '' : `<option value="${i}" ${i === S.sel ? 'selected' : ''}>Schritt ${i + 1}</option>`).join('') + '<option value="new">→ eigener Schritt</option>';
   el.innerHTML = `<div class="card stack">
     <div><label class="f" for="cad-ti">Überschrift</label><input id="cad-ti" value="${esc(st.title)}" maxlength="70"></div>
     <div><label class="f" for="cad-tx">Montageanweisung <span class="tiny">(jede Zeile = ein Punkt)</span></label><textarea id="cad-tx" rows="4">${esc(st.text)}</textarea>
@@ -726,6 +754,26 @@ function renderIns() {
   on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
   on('cad-dir', 'change', e => { st.dir = +e.target.value; st.cam = null; afterChange(); });
   $$('select[data-move]', el).forEach(s => s.addEventListener('change', e => movePart(+e.target.dataset.move, e.target.value === 'new' ? 'new' : +e.target.value)));
+}
+function renderWireIns(el, st) {
+  const ws = wiresOf(st);
+  el.innerHTML = `<div class="card stack">
+    <div><label class="f" for="cad-ti">Überschrift</label><input id="cad-ti" value="${esc(st.title)}" maxlength="70"></div>
+    <div><label class="f" for="cad-tx">Montageanweisung <span class="tiny">(jede Zeile = ein Punkt)</span></label><textarea id="cad-tx" rows="5">${esc(st.text)}</textarea>
+      <div class="tiny" style="margin-top:4px">${st.auto ? 'Automatisch aus dem Schaltplan erzeugt.' : 'Manuell bearbeitet.'} <button class="btn ghost sm" data-cad="regen" style="min-height:28px;padding:0 6px">neu erzeugen</button></div></div>
+    <div><label class="f" for="cad-to">Werkzeug</label><input id="cad-to" value="${esc(st.tools)}" placeholder="z. B. Schraubendreher 0,6 × 3,5"></div>
+    <div><label class="f" for="cad-no">Wichtiger Hinweis</label><textarea id="cad-no" rows="2">${esc(st.note)}</textarea></div>
+  </div>
+  <div class="sect">Verkabelung in diesem Schritt</div>
+  <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>von</th><th>nach</th><th>Ader</th><th></th></tr></thead><tbody>
+    ${ws.map(c => `<tr><td>${esc(short(c.a))}</td><td>${esc(short(c.b))}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
+  </tbody></table></div>
+  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Linie = Kabelweg (Aderfarbe, sonst gelb). Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
+  const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
+  on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
+  on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
+  on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
+  on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
 }
 function renderMap(el) {
   if (!S.bom) { el.innerHTML = '<div class="card"><p class="small muted" style="margin:0">Keine Stückliste geladen – die Benennungen kommen aus den STEP-Teilenamen, Artikelnummern fehlen.</p></div>'; return; }
@@ -790,9 +838,326 @@ function movePart(id, to) {
   afterChange();
 }
 function afterChange() {
-  S.steps = S.steps.filter(s => s.parts.length);
+  S.steps = S.steps.filter(s => s.parts.length || (s.kind === 'wire' && wiresOf(s).length));
   S.sel = Math.max(0, Math.min(S.sel, S.steps.length - 1));
   regenTexts(); renderWork(); scheduleThumbs();
+}
+
+// ======================= Elektro (V5): Schaltplan → Verdrahtungsschritte =======================
+const WIRE_COLORS = { vio: 0x7048e8, vi: 0x7048e8, br: 0x8b5a2b, bn: 0x8b5a2b, sw: 0x222222, bk: 0x222222, bl: 0x1c7ed6, bu: 0x1c7ed6, rt: 0xe03131, rd: 0xe03131,
+  gn: 0x2f9e44, ge: 0xf2c200, ye: 0xf2c200, gnge: 0x8bc34a, gnye: 0x8bc34a, ws: 0xf1f3f5, wh: 0xf1f3f5, gr: 0x868e96, gy: 0x868e96, or: 0xfd7e14, og: 0xfd7e14 };
+const SRC_COL = '#2f9e44', DST_COL = '#1971c2', CABLE_COL = 0xf2b705;
+let pickMode = null;      // {bmk, mode:'part'|'marker'}
+let wireGroup = null;
+
+function elecInit() { if (!S.elec) S.elec = { file: null, res: null, conns: [], devices: [], terminals: [], map: {}, busy: false, err: '' }; return S.elec; }
+const isDev = (b) => elecInit().devices.some(d => d.bmk === b);
+const descOf = (b) => (elecInit().devices.find(d => d.bmk === b) || {}).desc || '';
+function devPartIds(b) { const m = elecInit().map[b]; return m && m.type === 'part' ? m.ids : []; }
+
+async function loadSchematic(file) {
+  const E = elecInit(); E.busy = true; E.err = ''; E.file = file; renderIns();
+  try {
+    const pdfjs = await import('../lib/pdf.js');
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL('../lib/pdf.worker.js', import.meta.url).href;
+    const res = await parseSchematic(pdfjs, new Uint8Array(await file.arrayBuffer()));
+    E.res = res;
+    E.devices = res.devices; E.terminals = res.terminals;
+    E.conns = res.conns.map(c => ({ id: rid(), a: c.a, b: c.b, color: c.color, cs: c.cs, page: c.page, use: false, userSet: false }));
+    if (!res.textPages) E.err = 'Das PDF enthält keinen auslesbaren Text (vermutlich ein Scan). Verbindungen bitte von Hand anlegen.';
+    else if (!E.conns.length) E.err = 'Es wurden keine Verbindungen erkannt. Verbindungen bitte von Hand anlegen.';
+    autoMapElec(); updateUse();
+  } catch (e) { console.error(e); E.err = 'Das PDF konnte nicht gelesen werden: ' + e.message; }
+  finally { E.busy = false; renderIns(); }
+}
+
+// Geräte (Lüfter, Netzteil …) den 3D-Teilen zuordnen: Beschreibung ↔ Benennung, Gruppe ↔ Baugruppenname
+function autoMapElec() {
+  const E = elecInit(); const title = new Set(norm(S.meta.title).split(' ').filter(t => t.length > 3));
+  const tok = (s) => new Set(norm(s).split(' ').filter(t => t.length > 2));
+  const used = new Set(Object.values(E.map).filter(m => m.type === 'part').flatMap(m => m.ids));
+  const cand = [];
+  for (const d of E.devices) {
+    if (E.map[d.bmk]) continue;
+    const dt = tok(d.desc + ' ' + d.desc.replace(/-/g, ' '));
+    const grpBonus = [...tok(d.group)].some(t => title.has(t) || [...title].some(x => x.includes(t) || t.includes(x))) ? 10 : 0;
+    for (const p of S.parts) {
+      const words = norm(labelOf(p)).split(' ').filter(Boolean);
+      const pt = new Set(words.filter(t => t.length > 2)); let sc = 0;
+      for (const t of dt) for (const u of pt) { if (t === u) sc += 2; else if (t.length > 4 && (u.includes(t) || t.includes(u))) sc += 0.5; }
+      if (sc && dt.has(words[0])) sc += 1;             // Benennung beginnt mit dem Gerätenamen (z. B. "Luefter 24VDC …")
+      if (sc) cand.push({ bmk: d.bmk, id: p.id, sc: sc + grpBonus });
+    }
+  }
+  cand.sort((x, y) => y.sc - x.sc || (x.bmk < y.bmk ? -1 : 1) || x.id - y.id);
+  const done = new Set();
+  for (const c of cand) {
+    if (done.has(c.bmk) || used.has(c.id)) continue;
+    // nur zuordnen, wenn die Gruppe passt oder es keine Konkurrenz mit Gruppenbonus gibt
+    if (c.sc < 10 && cand.some(o => o.id === c.id && o.sc >= 10)) continue;
+    E.map[c.bmk] = { type: 'part', ids: [c.id] }; done.add(c.bmk); used.add(c.id);
+  }
+}
+// Relevante Verbindungen: an zugeordneten Geräten, Brücken zwischen deren Klemmleisten, Zuleitungen an diese Klemmleisten
+function updateUse() {
+  const E = elecInit();
+  const devs = new Set(E.devices.filter(d => devPartIds(d.bmk).length).map(d => d.bmk));
+  const terms = new Set();
+  for (const c of E.conns) for (const [x, y] of [[c.a, c.b], [c.b, c.a]]) if (x.kind === 'dev' && devs.has(x.bmk) && y.kind === 'term') terms.add(y.bmk);
+  for (const b in E.map) if (E.map[b].type === 'marker' || (E.map[b].type === 'part' && !isDev(b))) terms.add(b);
+  for (const c of E.conns) {
+    if (c.userSet) continue;
+    const ends = [c.a, c.b];
+    c.use = ends.some(e => e.kind === 'dev' && devs.has(e.bmk)) ||
+      (ends.every(e => e.kind === 'ext' || (e.kind === 'term' && terms.has(e.bmk))) && ends.some(e => e.kind === 'term'));
+  }
+}
+function parseEnd(txt) {
+  const E = elecInit(); txt = String(txt || '').trim();
+  if (!txt) return null;
+  if (/^(→|->)/.test(txt)) { const r = txt.replace(/^(→|->)\s*/, ''); const m = r.match(/^(\S+)\s*(.*)$/); return { kind: 'ext', ext: m ? m[1] : r, sig: m ? m[2] : '' }; }
+  const m = txt.match(/^(.+?)[:](.+)$/); if (!m) return null;
+  const known = [...E.devices.map(d => d.bmk), ...E.terminals];
+  const full = known.find(b => b === m[1]) || known.find(b => shortBmk(b) === m[1].replace(/^.*-/, '')) || m[1];
+  return { kind: isDev(full) ? 'dev' : 'term', bmk: full, pin: m[2].trim() };
+}
+
+// Schritte erzeugen
+function buildWireSteps() {
+  const E = elecInit();
+  const used = E.conns.filter(c => c.use && c.a && c.b);
+  if (!used.length) { toast('Keine Verbindungen ausgewählt.'); return; }
+  S.steps = S.steps.filter(s => s.kind !== 'wire');
+  const stepOfPart = new Map(); S.steps.forEach((s, i) => s.parts.forEach(p => stepOfPart.set(p, i)));
+  const byDev = new Map(), bridges = new Map(), feeds = new Map(), rest = [];
+  for (const c of used) {
+    const dEnd = [c.a, c.b].find(e => e.kind === 'dev' && devPartIds(e.bmk).length) || [c.a, c.b].find(e => e.kind === 'dev');
+    if (dEnd) { if (!byDev.has(dEnd.bmk)) byDev.set(dEnd.bmk, []); byDev.get(dEnd.bmk).push(c); continue; }
+    if (c.a.kind === 'term' && c.b.kind === 'term') { const k = [c.a.bmk, c.b.bmk].sort().join('|'); if (!bridges.has(k)) bridges.set(k, []); bridges.get(k).push(c); continue; }
+    const t = [c.a, c.b].find(e => e.kind === 'term');
+    if (t) { if (!feeds.has(t.bmk)) feeds.set(t.bmk, []); feeds.get(t.bmk).push(c); continue; }
+    rest.push(c);
+  }
+  const devOrder = [...byDev.keys()].sort((x, y) => {
+    const sx = Math.min(...devPartIds(x).map(id => stepOfPart.get(id) ?? 1e9), 1e9), sy = Math.min(...devPartIds(y).map(id => stepOfPart.get(id) ?? 1e9), 1e9);
+    return sx - sy || (x < y ? -1 : 1);
+  });
+  const mk = (sub, conns, key) => ({ uid: rid(), parts: [], dir: -1, kind: 'wire', sub, key, wires: conns.map(c => c.id), title: '', text: '', note: '', tools: '', auto: true, cam: null });
+  const add = [];
+  for (const b of devOrder) add.push(mk('dev', byDev.get(b), b));
+  for (const [k, cs] of bridges) add.push(mk('bridge', cs, k));
+  for (const [k, cs] of feeds) add.push(mk('feed', cs, k));
+  if (rest.length) add.push(mk('other', rest, ''));
+  S.steps.push(...add);
+  S.sel = S.steps.length - add.length;
+  insTab = 'step'; regenTexts(); renderWork(); scheduleThumbs();
+  toast(add.length + ' Verdrahtungsschritt' + (add.length === 1 ? '' : 'e') + ' angelegt');
+}
+const wiresOf = (st) => (st.wires || []).map(id => elecInit().conns.find(c => c.id === id)).filter(Boolean);
+const short = (e) => endLabel(e, true);
+const adern = (c) => [c.color ? colorName(c.color) : '', c.cs].filter(Boolean).join(', ');
+function genWireText(st) {
+  // Kurzer Text – die genaue Belegung steht in der Tabelle „Verkabelung“ auf der Folie
+  const ws = wiresOf(st); const lines = []; let title = '';
+  const n = ws.length, aw = n === 1 ? '1 Ader' : n + ' Adern';
+  const tSet = [...new Set(ws.flatMap(c => [c.a, c.b]).filter(e => e.kind === 'term').map(e => shortBmk(e.bmk)))];
+  if (st.sub === 'dev') {
+    const desc = descOf(st.key);
+    title = (desc ? desc + ' ' : '') + shortBmk(st.key) + ' anschließen';
+    lines.push(`${shortBmk(st.key)}: ${aw} an ${tSet.join(', ') || 'Klemme'} anschließen`, 'Belegung siehe Tabelle Verkabelung', 'Sitz der Adern prüfen (Zugprobe)');
+  } else if (st.sub === 'bridge') {
+    const [x, y] = st.key.split('|').map(shortBmk);
+    title = 'Brücken ' + x + ' → ' + y + ' setzen';
+    lines.push(`${n} Brücke${n === 1 ? '' : 'n'} von ${x} nach ${y} setzen`, 'Aderfarbe und Querschnitt siehe Tabelle');
+  } else if (st.sub === 'feed') {
+    title = 'Zuleitung an ' + shortBmk(st.key) + ' anschließen';
+    lines.push(`${aw} der Zuleitung an ${shortBmk(st.key)} anschließen`, 'Belegung siehe Tabelle Verkabelung');
+  } else { title = 'Weitere Verbindungen'; lines.push(aw + ' laut Tabelle anschließen'); }
+  const pages = [...new Set(ws.map(c => c.page).filter(Boolean))];
+  return { title, text: lines.join('\n'), tools: '', note: pages.length ? 'Laut Schaltplan Seite ' + pages.join(', ') : '' };
+}
+// Anker im 3D für ein Kennzeichen
+function anchorOf(bmk, towards) {
+  const m = elecInit().map[bmk];
+  if (m && m.type === 'marker') return new THREE.Vector3().fromArray(m.p);
+  if (m && m.type === 'part' && m.ids.length) {
+    const b = partsBox(m.ids);
+    return towards ? b.clampPoint(towards, new THREE.Vector3()) : b.getCenter(new THREE.Vector3());
+  }
+  return null;
+}
+function labelSprite(text, color) {
+  const cv = document.createElement('canvas'); const ctx = cv.getContext('2d');
+  const fs = 44; ctx.font = `700 ${fs}px system-ui, sans-serif`;
+  const w = Math.ceil(ctx.measureText(text).width) + 36; cv.width = w; cv.height = fs + 28;
+  ctx.font = `700 ${fs}px system-ui, sans-serif`;
+  ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(0, 0, w, cv.height, 14) : ctx.rect(0, 0, w, cv.height); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(text, 18, cv.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, sizeAttenuation: false }));
+  const h = 0.034; sp.scale.set(h * w / cv.height, h, 1); sp.renderOrder = 10;   // feste Größe auf dem Bild
+  return sp;
+}
+function clearWires() {
+  if (!wireGroup) return;
+  wireGroup.traverse(o => { o.geometry?.dispose(); if (o.material) { o.material.map?.dispose(); o.material.dispose(); } });
+  wireGroup.clear();
+}
+// Szene für einen Verdrahtungsschritt; liefert die Box der beteiligten Punkte
+function applyWireStep(st) {
+  if (!wireGroup) { wireGroup = new THREE.Group(); scene.add(wireGroup); }
+  clearWires();
+  const E = elecInit(); const ws = wiresOf(st);
+  const diag = modelBox.getSize(new THREE.Vector3()).length(); const center = modelBox.getCenter(new THREE.Vector3());
+  const up = S.meta.upAxis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+  const srcIds = new Set(), dstIds = new Set(); const box = new THREE.Box3();
+  const endsBmk = new Set(ws.flatMap(c => [c.a, c.b]).filter(e => e.kind !== 'ext').map(e => e.bmk));
+  for (const b of endsBmk) { const m = E.map[b]; if (m && m.type === 'part') (isDev(b) ? srcIds : dstIds).add(...m.ids); }
+  meshes.forEach((m, id) => {
+    m.position.set(0, 0, 0); ghostMeshes[id].visible = false; m.visible = true;
+    m.material = srcIds.has(id) ? mats.src : dstIds.has(id) ? mats.dst : mats.dim;
+  });
+  srcIds.forEach(id => box.union(S.parts[id].box)); dstIds.forEach(id => box.union(S.parts[id].box));
+  // Ersatzpositionen für nicht platzierte Klemmen: neben dem Gerät
+  const fallback = new Map();
+  const anchor = (e, other) => {
+    if (e.kind === 'ext') return null;
+    const a = anchorOf(e.bmk, other); if (a) return a;
+    if (!fallback.has(e.bmk)) {
+      let base = other;
+      if (!base) {   // nicht platzierte Klemme: neben dem verbundenen Gerät anordnen
+        const dev = E.conns.filter(c => c.use).flatMap(c => [[c.a, c.b], [c.b, c.a]]).find(([x, y]) => x.kind === 'term' && x.bmk === e.bmk && y.kind === 'dev' && devPartIds(y.bmk).length);
+        base = dev ? partsBox(devPartIds(dev[1].bmk)).getCenter(new THREE.Vector3()) : center.clone();
+      }
+      const out = base.clone().sub(center); out.sub(up.clone().multiplyScalar(out.dot(up))); if (out.lengthSq() < 1) out.set(1, 0, 0); out.normalize();
+      fallback.set(e.bmk, base.clone().add(out.multiplyScalar(diag * 0.2)).add(up.clone().multiplyScalar(diag * 0.05 * (fallback.size + 1))));
+    }
+    return fallback.get(e.bmk);
+  };
+  const labels = new Map();
+  const pairs = new Map();
+  ws.forEach((c, i) => {
+    let A0 = anchor(c.a, null), B0 = anchor(c.b, null);
+    const a = c.a.kind === 'ext' ? null : anchor(c.a, B0 || A0), b = c.b.kind === 'ext' ? null : anchor(c.b, A0 || B0);
+    let pa = a, pb = b;
+    if (!pa && pb) { const out = pb.clone().sub(center).normalize(); pa = pb.clone().add(out.multiplyScalar(diag * 0.22)); }
+    if (!pb && pa) { const out = pa.clone().sub(center).normalize(); pb = pa.clone().add(out.multiplyScalar(diag * 0.22)); }
+    if (!pa || !pb) return;
+    const key = [short(c.a).split(':')[0], short(c.b).split(':')[0]].join('|');
+    const n = pairs.get(key) || 0; pairs.set(key, n + 1);
+    const mid = pa.clone().add(pb).multiplyScalar(0.5);
+    const out = mid.clone().sub(center); if (out.lengthSq() < 1) out.copy(up); out.normalize();
+    const len = pa.distanceTo(pb);
+    const ctrl = mid.add(out.multiplyScalar(len * 0.25 + diag * 0.02)).add(up.clone().multiplyScalar(len * 0.12 + n * diag * 0.012));
+    const curve = new THREE.QuadraticBezierCurve3(pa, ctrl, pb);
+    const col = WIRE_COLORS[(c.color || '').toLowerCase()] ?? CABLE_COL;
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, diag * 0.0035, 8, false), new THREE.MeshStandardMaterial({ color: col, roughness: 0.45, emissive: col, emissiveIntensity: 0.15 }));
+    wireGroup.add(tube);
+    for (const p of [pa, pb]) { const s = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.007, 12, 8), new THREE.MeshStandardMaterial({ color: col })); s.position.copy(p); wireGroup.add(s); }
+    box.expandByPoint(pa); box.expandByPoint(pb); box.expandByPoint(ctrl);
+    for (const [e, p] of [[c.a, pa], [c.b, pb]]) {
+      const k = e.kind === 'ext' ? 'ext|' + e.ext + '|' + e.sig : e.bmk;
+      if (!labels.has(k)) labels.set(k, { e, p, pins: new Set() });
+      if (e.pin) labels.get(k).pins.add(e.pin);
+    }
+  });
+  for (const [k, L] of labels) {
+    const e = L.e;
+    let text, col;
+    if (e.kind === 'ext') { text = '→ ' + (e.sig || e.ext); col = '#495057'; }
+    else { text = shortBmk(e.bmk) + (L.pins.size && !isDev(e.bmk) ? ' ' + [...L.pins].join(' / ') : ''); col = isDev(e.bmk) ? SRC_COL : DST_COL; }
+    const sp = labelSprite(text, col);
+    sp.position.copy(L.p).add(up.clone().multiplyScalar(diag * (e.kind === 'dev' ? 0.06 : 0.025)));
+    wireGroup.add(sp);
+    // nicht platzierte Klemmleiste als Würfel andeuten
+    if (e.kind === 'term' && !(E.map[e.bmk] && E.map[e.bmk].type === 'part')) {
+      const cube = new THREE.Mesh(new THREE.BoxGeometry(diag * 0.022, diag * 0.022, diag * 0.022), mats.dst); cube.position.copy(L.p); wireGroup.add(cube);
+    }
+  }
+  return box;
+}
+
+function renderElec(el) {
+  const E = elecInit();
+  if (E.busy) { el.innerHTML = '<div class="card"><span class="spin" style="display:inline-block;vertical-align:middle"></span> Schaltplan wird ausgewertet…</div>'; return; }
+  if (!E.res) {
+    el.innerHTML = `<div class="card stack">
+      <label class="cad-drop" id="el-drop" style="min-height:120px"><input type="file" id="el-file" accept=".pdf,application/pdf">
+        <span class="ic">⚡</span><b>Schaltplan (PDF)</b><span class="small muted">Aus dem E-CAD exportiertes PDF mit markierbarem Text. Kennzeichen, Klemmstellen und Leitungen werden ausgelesen.</span></label>
+      ${E.err ? `<div class="banner">${esc(E.err)}</div>` : ''}
+      <p class="tiny" style="margin:0">Das PDF wird nur in diesem Browser gelesen und nicht hochgeladen.</p>
+      <button class="btn sm" data-cad="el-manual">Ohne PDF: Verbindungen von Hand anlegen</button>
+    </div>`;
+    const inp = $('#el-file', el), z = $('#el-drop', el);
+    inp.addEventListener('change', () => inp.files[0] && loadSchematic(inp.files[0]));
+    z.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); z.classList.add('over'); });
+    z.addEventListener('dragleave', () => z.classList.remove('over'));
+    z.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) loadSchematic(f); });
+    return;
+  }
+  const partOpts = (cur) => '<option value="">— nicht in dieser Baugruppe —</option>' + S.parts.map(p => {
+    const si = S.steps.findIndex(s => s.parts.includes(p.id));
+    return `<option value="${p.id}" ${cur && cur.type === 'part' && cur.ids[0] === p.id ? 'selected' : ''}>${esc(labelOf(p))}${si >= 0 ? ' (Schritt ' + (si + 1) + ')' : ''}</option>`;
+  }).join('') + (cur && cur.type === 'marker' ? '<option value="marker" selected>📍 Position gesetzt</option>' : '');
+  const bmkRow = (b, kind) => {
+    const m = E.map[b]; const d = E.devices.find(x => x.bmk === b);
+    const st = m ? '<span class="chip" style="background:var(--ok-soft);color:var(--ok)">✓</span>' : '<span class="chip">–</span>';
+    return `<tr><td><b>${esc(shortBmk(b))}</b><div class="tiny">${esc(kind === 'dev' ? (d.desc || 'Gerät') + (d.group ? ' · ' + d.group : '') : 'Klemmleiste')}</div></td>
+      <td><select data-elmap="${esc(b)}" aria-label="3D-Teil für ${esc(b)}">${partOpts(m)}</select>
+      <div class="row" style="gap:4px;margin-top:4px"><button class="btn sm ghost" data-cad="el-pick" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">im 3D wählen</button>${kind === 'term' ? `<button class="btn sm ghost" data-cad="el-mark" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">📍 Position setzen</button>` : ''}</div></td><td>${st}</td></tr>`;
+  };
+  const used = E.conns.filter(c => c.use).length;
+  const relevantDevs = E.devices.filter(d => E.map[d.bmk] || E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === d.bmk)));
+  const otherDevs = E.devices.filter(d => !relevantDevs.includes(d));
+  const termsUsed = E.terminals.filter(t => E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === t)) || E.map[t]);
+  const termsOther = E.terminals.filter(t => !termsUsed.includes(t));
+  const sortedConns = E.conns.slice().sort((x, y) => (y.use - x.use));
+  el.innerHTML = `
+  <div class="card stack">
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:6px"><div><b>${esc(E.file ? E.file.name : 'Manuelle Eingabe')}</b><div class="tiny">${E.res.pages || 0} Seiten · ${E.conns.length} Verbindungen · ${E.devices.length} Geräte · ${E.terminals.length} Klemmleisten</div></div>
+      <button class="btn sm ghost" data-cad="el-reset">Anderes PDF</button></div>
+    ${E.err ? `<div class="warnbox">⚠ ${esc(E.err)}</div>` : ''}
+    ${pickMode ? `<div class="banner info"><b>${pickMode.mode === 'marker' ? 'Position für ' : 'Teil für '}${esc(shortBmk(pickMode.bmk))}</b> jetzt im 3D-Bild antippen. <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
+  </div>
+  <div class="sect">Geräte und Klemmen im 3D-Modell</div>
+  <div class="card" style="padding:8px 12px"><table class="cad-maptab"><colgroup><col style="width:34%"><col><col style="width:40px"></colgroup><tbody>
+    ${relevantDevs.map(d => bmkRow(d.bmk, 'dev')).join('')}${termsUsed.map(t => bmkRow(t, 'term')).join('')}
+    ${!relevantDevs.length && !termsUsed.length ? '<tr><td colspan="3" class="small muted">Noch nichts zugeordnet. Wähle unten bei „Weitere“ das passende Teil.</td></tr>' : ''}
+  </tbody></table>
+  ${otherDevs.length || termsOther.length ? `<details style="margin-top:6px"><summary class="small" style="cursor:pointer">Weitere Kennzeichen im Plan (${otherDevs.length + termsOther.length})</summary><table class="cad-maptab"><colgroup><col style="width:34%"><col><col style="width:40px"></colgroup><tbody>${otherDevs.map(d => bmkRow(d.bmk, 'dev')).join('')}${termsOther.map(t => bmkRow(t, 'term')).join('')}</tbody></table></details>` : ''}
+  <p class="tiny" style="margin:6px 0 0">Klemmen, die im Modell fehlen, mit „📍 Position setzen“ einmal im 3D-Bild markieren.</p></div>
+  <div class="sect">Verbindungen (${used} für diese Baugruppe)</div>
+  <div class="card" style="padding:6px 8px;overflow-x:auto"><table class="cad-ptab el-tab"><thead><tr><th></th><th>von</th><th>nach</th><th>Ader</th></tr></thead><tbody>
+    ${sortedConns.map(c => `<tr class="${c.use ? '' : 'off'}"><td><input type="checkbox" data-eluse="${c.id}" ${c.use ? 'checked' : ''} aria-label="verwenden"></td>
+      <td><input class="el-in" data-elend="${c.id}:a" value="${esc(short(c.a))}"></td><td><input class="el-in" data-elend="${c.id}:b" value="${esc(short(c.b))}"></td>
+      <td><input class="el-in" data-elad="${c.id}" value="${esc([c.color, c.cs].filter(Boolean).join(' '))}" placeholder="—" style="width:80px"></td></tr>`).join('')}
+  </tbody></table>
+  <button class="btn sm" data-cad="el-add" style="margin-top:6px">+ Verbindung</button></div>
+  <button class="btn primary block" data-cad="el-build" style="margin-top:12px" ${used ? '' : 'disabled'}>Verdrahtungsschritte erzeugen (${used})</button>
+  <p class="tiny">Die Schritte kommen nach der Verschraubung: je Gerät ein Schritt, dann Brücken und Zuleitungen. Vorhandene Verdrahtungsschritte werden ersetzt.</p>`;
+  $$('select[data-elmap]', el).forEach(s => s.addEventListener('change', e => {
+    const b = e.target.dataset.elmap, v = e.target.value;
+    if (v === '') delete E.map[b]; else if (v !== 'marker') E.map[b] = { type: 'part', ids: [+v] };
+    updateUse(); renderIns(); previewBmk(b);
+  }));
+  $$('input[data-eluse]', el).forEach(i => i.addEventListener('change', e => { const c = E.conns.find(x => x.id === e.target.dataset.eluse); c.use = e.target.checked; c.userSet = true; renderIns(); }));
+  $$('input[data-elend]', el).forEach(i => i.addEventListener('change', e => {
+    const [id, side] = e.target.dataset.elend.split(':'); const c = E.conns.find(x => x.id === id); const v = parseEnd(e.target.value);
+    if (v) { c[side] = v; c.userSet = true; c.use = true; } else toast('Format: X8:1.2 oder → 10.F2 V+');
+    regenTexts(); renderIns();
+  }));
+  $$('input[data-elad]', el).forEach(i => i.addEventListener('change', e => {
+    const c = E.conns.find(x => x.id === e.target.dataset.elad); const t = e.target.value.trim().split(/\s+/);
+    c.color = t[0] && !/\d/.test(t[0]) ? t[0] : ''; c.cs = t.filter(x => /\d/.test(x)).join(' ').replace(/(\d)$/, '$1 mm²').replace(/mm² mm²/, 'mm²'); regenTexts();
+  }));
+}
+// Vorschau: zugeordnetes Teil kurz grün zeigen
+function previewBmk(b) {
+  const ids = elecInit().map[b]?.ids || [];
+  if (!ids.length) return;
+  meshes.forEach((m, id) => { m.visible = true; m.position.set(0, 0, 0); ghostMeshes[id].visible = false; m.material = ids.includes(id) ? mats.src : mats.dim; });
+  arrowGroup.clear(); clearWires(); needRender = true;
+  clearTimeout(previewBmk.t); previewBmk.t = setTimeout(() => showStep(S.sel), 1800);
 }
 
 // ======================= Übernahme in den Recorder =======================
@@ -806,6 +1171,13 @@ async function takeOver() {
       const st = S.steps[i];
       const canvas = renderTo(i, 1600, 1500, '#ffffff');
       const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.88));
+      if (st.kind === 'wire') {
+        steps.push({ title: st.title.slice(0, 70), instructions: st.text, warning: st.note || '', materials: [],
+          tools: (st.tools || '').split(',').map(x => x.trim()).filter(Boolean).map(t => ({ tool: t, torque: '' })),
+          cables: wiresOf(st).map(c => ({ designation: adern(c) || 'Ader', from: short(c.a), to: short(c.b) })),
+          image: { blob, w: 1600, h: 1500 } });
+        continue;
+      }
       const groups = stepGroups(st);
       const torque = groups.map(g => g.bom?.torque).find(Boolean) || '';
       const toolList = (st.tools || '').split(',').map(x => x.trim()).filter(Boolean);
@@ -853,6 +1225,14 @@ document.addEventListener('click', e => {
     }
     case 'restart': S.analyzed = false; return render();
     case 'takeover': return takeOver();
+    case 'el-manual': { const E = elecInit(); E.res = { pages: 0, textPages: 0 }; E.conns.push({ id: rid(), a: { kind: 'term', bmk: 'X1', pin: '1' }, b: { kind: 'dev', bmk: 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); E.terminals = [...new Set([...E.terminals, 'X1'])]; E.devices = E.devices.some(d => d.bmk === 'M1') ? E.devices : [...E.devices, { bmk: 'M1', desc: 'Gerät' }]; return renderIns(); }
+    case 'el-reset': { const E = elecInit(); E.res = null; E.file = null; E.conns = []; E.err = ''; pickMode = null; return renderIns(); }
+    case 'el-pick': pickMode = { bmk: el.dataset.bmk, mode: 'part' }; renderIns(); return toast('Teil im 3D-Bild antippen');
+    case 'el-mark': pickMode = { bmk: el.dataset.bmk, mode: 'marker' }; renderIns(); return toast('Stelle im 3D-Bild antippen, an der die Klemme sitzt');
+    case 'el-pickcancel': pickMode = null; return renderIns();
+    case 'el-add': { const E = elecInit(); E.conns.unshift({ id: rid(), a: { kind: 'term', bmk: E.terminals[0] || 'X1', pin: '1' }, b: { kind: 'dev', bmk: (E.devices[0] || {}).bmk || 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); return renderIns(); }
+    case 'el-build': return buildWireSteps();
+    case 'wire-rm': { const st = S.steps[S.sel]; st.wires = st.wires.filter(x => x !== el.dataset.id); return afterChange(); }
   }
 });
 document.addEventListener('keydown', e => {
