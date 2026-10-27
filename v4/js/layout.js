@@ -31,9 +31,28 @@ const LABELS = {
 /* ---------- Textmaß-Schätzung ---------- */
 function lineH(pt) { return pt * 1.2 / 72; }
 function charW(pt, bold) { return pt * (bold ? 0.56 : 0.52) / 72; }
+/* Textbreite in Zoll – gemessen in der Folienschrift (Calibri; sonst ähnlich breite Ersatzschrift).
+   Kleiner Sicherheitszuschlag, damit eher eine Zeile zu viel als zu wenig eingeplant wird. */
+let _mctx = null;
+function textW(t, pt, bold) {
+  try {
+    _mctx = _mctx || document.createElement('canvas').getContext('2d');
+    _mctx.font = `${bold ? '700 ' : ''}${(pt * 96 / 72).toFixed(2)}px Calibri, Carlito, "Segoe UI", Arial, sans-serif`;
+    return _mctx.measureText(t).width / 96 * 1.06;
+  } catch (e) { return t.length * charW(pt, bold); }
+}
 function countLines(text, w, pt, bold) {
-  const per = Math.max(1, Math.floor((w - 0.2) / charW(pt, bold)));
-  return String(text || '').split('\n').reduce((n, para) => n + Math.max(1, Math.ceil(para.length / per)), 0);
+  const avail = Math.max(0.1, w - 0.2);
+  return String(text || '').split('\n').reduce((n, para) => {
+    let lines = 1, cur = 0;
+    for (const word of para.split(/(?<=[\s\-\/])/)) {        // Umbruch nach Leerzeichen, Bindestrich, Schrägstrich
+      const ww = textW(word, pt, bold);
+      if (cur + ww <= avail || cur === 0) {
+        if (ww > avail) { lines += Math.ceil(ww / avail) - 1; cur = ww % avail; } else cur += ww;
+      } else { lines++; cur = ww > avail ? ww % avail : ww; if (ww > avail) lines += Math.ceil(ww / avail) - 1; }
+    }
+    return n + lines;
+  }, 0);
 }
 function textH(text, w, pt, bold) { return countLines(text, w, pt, bold) * lineH(pt) + 0.12; }
 
@@ -102,7 +121,7 @@ function arrangePhotos(photos) {
 
 /* ---------- Bausteine rechte Spalte ---------- */
 /* Kompakte Tabellen: Zeilenhöhe = Text + kleiner Innenabstand (statt fester 0,4") */
-const TAB = { pt: 16, desc: 14, padV: 0.03, padH: 0.06 };
+const TAB = { pt: 18, desc: 14, padV: 0.03, padH: 0.06 };
 const TAB_MARGIN = [TAB.padV, TAB.padH, TAB.padV, TAB.padH];
 const cellH = (text, w, pt, bold) => countLines(text, w - 2 * TAB.padH + 0.2, pt, bold) * lineH(pt) + 2 * TAB.padV;
 const ROW_MIN = lineH(TAB.pt) + 2 * TAB.padV;
@@ -112,8 +131,8 @@ function materialTable(materials, y) {
   const rows = [[
     { text: 'Pos.', o: head }, { text: 'Artikelnummer', o: head },
     { text: 'Bezeichnung', o: head }, { text: 'Anz.', o: head }]];
-  const rowH = [ROW_MIN];
-  const colW = [0.53, 1.92, 3.43, 0.72];
+  const colW = [0.64, 1.9, 3.34, 0.72];
+  const rowH = [Math.max(ROW_MIN, ...rows[0].map((c, k) => cellH(c.text, colW[k], TAB.pt, true)))];
   if (materials.length) {
     materials.forEach((m, i) => {
       const fill = i % 2 === 0 ? C.white : C.zebra;
