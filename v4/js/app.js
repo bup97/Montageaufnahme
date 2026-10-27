@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.2.2';
+const VERSION = '5.2.3';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -381,6 +381,7 @@ function renderProject() {
             </div>
           </div>
           <div class="mv"><button data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
+          <button class="x sdel" data-act="sdel" data-id="${s.id}" aria-label="Schritt ${i + 1} löschen" title="Schritt löschen">🗑</button>
         </div>`;
       }).join('')}
       ${labels.end.map(labelCard).join('')}
@@ -410,7 +411,8 @@ function projectGrid(p, labels) {
           <span class="grow"></span>
           <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne">◀</button>
           <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten">▶</button>
-          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten">✎</button></div>
+          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten">✎</button>
+          <button class="icon-btn sm sdel" data-act="sdel" data-id="${s.id}" title="Schritt löschen">🗑</button></div>
       </div>`;
     }).join('')}
     <button class="pslide add" data-act="add-step"><span>+</span>Schritt hinzufügen</button>
@@ -502,6 +504,7 @@ function renderStep() {
   <header class="top"><div class="top-in">
     <button class="icon-btn" data-act="back-project" aria-label="Zur Übersicht">‹</button>
     <div class="grow" style="min-width:0"><h1>Schritt ${n} <span class="muted" style="font-weight:500">von ${p.steps.length}</span></h1><div class="sub">${esc(pTitle(p))}</div></div>
+    <button class="icon-btn sdel" data-act="sdel-cur" aria-label="Schritt löschen" title="Schritt löschen">🗑</button>
     <button class="icon-btn" data-act="smenu" aria-label="Mehr">⋯</button>
   </div></header>
   <main class="wrap wide">
@@ -903,6 +906,8 @@ document.addEventListener('click', async e => {
     case 'tab': return go(`#/p/${S.P.id}/s/${s.id}/${x}`);
     case 'next': return addStep(s.id);
     case 'smenu': return stepMenu();
+    case 'sdel': { const st = S.P && S.P.steps.find(x => x.id === id); return st && deleteStep(st); }
+    case 'sdel-cur': { const st = curStep(); return st && deleteStep(st); }
     case 'scan': {
       const code = await Media.scan(); if (!code) return;
       $('#m-no').value = code; const h = matHistory()[code.toUpperCase()]; if (h && !$('#m-de').value) $('#m-de').value = h.description;
