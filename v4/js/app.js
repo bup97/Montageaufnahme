@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.1.0';
+const VERSION = '5.1.1';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -180,8 +180,8 @@ let cadModule = null;
 async function renderCad() {
   $('#app').innerHTML = `
   <header class="top"><div class="top-in"><div class="brandbar"><img src="img/logo.png" alt="funkwerk"><span>Montage-Recorder</span></div></div></header>
-  <main class="wrap" style="max-width:1440px">
-    <div style="max-width:760px">${homeTabs('cad')}</div>
+  <main class="wrap cad-wrap">
+    ${homeTabs('cad')}
     <div id="cad-root"><div class="empty"><span class="spin" style="display:inline-block"></span><br>Wird geladen…</div></div>
   </main>`;
   try {

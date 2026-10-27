@@ -597,6 +597,7 @@ const STYLE = `
 .el-tab input[type=checkbox]{width:18px;height:18px;min-height:0}
 .el-tab tr.off td{opacity:.5}
 .chip.scan{background:#fff6bf;color:#6b5a00}
+@media(min-width:1700px){.cad-work{grid-template-columns:340px minmax(0,1fr) 440px;gap:18px}}
 @media(max-width:1180px){.cad-work{grid-template-columns:260px minmax(0,1fr)}.cad-work .cad-ins{grid-column:1/-1}}
 @media(max-width:760px){.cad-work{display:flex;flex-direction:column}.cad-viewer{height:52vh;width:100%}.cad-list{max-height:none}.cad-legend{display:none}.cad-work>*{width:100%}}
 `;
