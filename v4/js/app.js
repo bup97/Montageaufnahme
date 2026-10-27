@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '4.1.0';
+const VERSION = '4.1.1';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -179,8 +179,8 @@ async function renderHome() {
     ${leg ? `<div class="banner info" style="margin-bottom:14px"><b>Aufnahme aus der alten Version gefunden</b><br>
       <span class="small">${esc([leg.state.projectInfo?.customer, leg.state.projectInfo?.product, leg.state.projectInfo?.variant].filter(Boolean).join(' · ') || 'Ohne Angaben')} – ${leg.count} Schritt(e). Sie bleibt in der alten Version erhalten.</span>
       <div class="row" style="margin-top:10px"><button class="btn primary sm" data-act="legacy-import">Übernehmen</button><button class="btn ghost sm" data-act="legacy-hide">Ausblenden</button></div></div>` : ''}
-    <button class="hero" data-act="new"><span class="plus">+</span><span><b>Neue Montageanleitung</b><span class="muted small">Schritte mit Material, Anweisung und Fotos erfassen</span></span></button>
-    <button class="btn block" data-act="import-pptx" style="margin-top:10px;min-height:54px">📊 Bestehende PowerPoint importieren</button>
+    <div class="home-actions"><button class="hero" data-act="new"><span class="plus">+</span><span><b>Neue Montageanleitung</b><span class="muted small">Schritte mit Material, Anweisung und Fotos erfassen</span></span></button>
+    <button class="btn block" data-act="import-pptx" style="margin-top:10px;min-height:54px">📊 Bestehende PowerPoint importieren</button></div>
     <div class="sect">Meine Anleitungen</div>
     ${S.projects.length ? `<div class="plist">${S.projects.map((p, i) => {
       const photos = p.steps.reduce((a, s) => a + s.photoIds.length, 0);
@@ -192,7 +192,7 @@ async function renderHome() {
         <button class="icon-btn" data-act="pmenu" data-id="${p.id}" aria-label="Mehr">⋯</button></div>`;
     }).join('')}</div>` : `<div class="empty">Noch keine Anleitungen.<br>Tippe oben auf „Neue Montageanleitung“.</div>`}
     <div class="sect">Weiteres</div>
-    <div class="card stack">
+    <div class="card stack home-more">
       <button class="btn block" data-act="import">Sicherung oder JSON importieren</button>
       <div class="tiny" id="storage">Speicher wird ermittelt…</div>
       <div class="tiny">Version ${VERSION} · Daten bleiben auf diesem Gerät · <a href="../" style="color:inherit">alte Version öffnen</a> · Created by P. Busch</div>
@@ -306,6 +306,7 @@ function renderProject() {
   </div></header>
   <main class="wrap">
     ${totalWarn ? `<div class="warnbox" style="margin-bottom:12px">⚠ ${totalWarn} Folie${totalWarn > 1 ? 'n' : ''} bitte prüfen – Schritt öffnen oder „Folien ansehen“.</div>` : ''}
+    ${isDesk() ? projectGrid(p, labels) : `
     <div class="steps">
       ${labels.start.map(labelCard).join('')}
       ${p.steps.map((s, i) => {
@@ -328,12 +329,36 @@ function renderProject() {
       ${labels.end.map(labelCard).join('')}
     </div>
     ${p.steps.length ? '' : '<div class="empty">Noch keine Schritte.</div>'}
-    <div class="row" style="margin-top:14px"><button class="btn block" data-act="add-step">+ Schritt hinzufügen</button></div>
+    <div class="row" style="margin-top:14px"><button class="btn block" data-act="add-step">+ Schritt hinzufügen</button></div>`}
   </main>
   <div class="bottom"><div class="bottom-in">
     <button class="btn" data-act="slides">Folien ansehen</button>
     <button class="btn primary" data-act="export">Exportieren</button>
   </div></div>`;
+  requestAnimationFrame(() => fitSlides());
+}
+
+/* PC: jeder Schritt als große Folienvorschau */
+const isDesk = () => matchMedia('(min-width:1040px)').matches;
+function projectGrid(p, labels) {
+  const lab = l => `<div class="pslide label">${slideHTML(Layout.layoutLabelSlide(l))}<div class="cap"><span class="chip">🏷 Label-Folie</span><span class="tiny">wird automatisch erzeugt</span></div></div>`;
+  return `<div class="pgrid">
+    ${labels.start.map(lab).join('')}
+    ${p.steps.map((s, i) => {
+      const lay = Layout.layoutStepSlide(s, i + 1, metasOf(s));
+      return `<div class="pslide">
+        <div data-act="step" data-id="${s.id}" class="pslide-click" title="Schritt bearbeiten">${slideHTML(lay)}</div>
+        <div class="cap"><b class="n">${i + 1}</b><span class="t">${esc(Layout.stepTitle(s, i + 1))}</span>
+          ${s.isScanStep ? '<span class="chip scan">Scan</span>' : ''}${lay.warnings.length ? `<span class="chip warn" title="${esc(lay.warnings.join(' '))}">⚠ prüfen</span>` : ''}
+          <span class="grow"></span>
+          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne">◀</button>
+          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten">▶</button>
+          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten">✎</button></div>
+      </div>`;
+    }).join('')}
+    <button class="pslide add" data-act="add-step"><span>+</span>Schritt hinzufügen</button>
+    ${labels.end.map(lab).join('')}
+  </div>`;
 }
 
 function moveStep(id, d) {
@@ -376,7 +401,12 @@ function slideHTML(lay, { highlight } = {}) {
   return `<div class="slide"><div class="slide-in">${parts.join('')}</div></div>`;
 }
 function fitSlides(root = document) { $$('.slide', root).forEach(s => s.style.setProperty('--s', (s.clientWidth / 1280).toFixed(4))); }
-addEventListener('resize', () => fitSlides());
+let lastDesk = matchMedia('(min-width:1040px)').matches;
+addEventListener('resize', () => {
+  fitSlides();
+  const d = matchMedia('(min-width:1040px)').matches;
+  if (d !== lastDesk) { lastDesk = d; if (S.route.view === 'project') renderProject(); if (S.route.view === 'step') renderStep(); }
+});
 
 function renderSlides() {
   const p = S.P, labels = Layout.labelsFor(p);
@@ -388,7 +418,7 @@ function renderSlides() {
   $('#app').innerHTML = `
   <header class="top"><div class="top-in"><button class="icon-btn" data-act="back-project" aria-label="Zurück">‹</button>
     <div class="grow"><h1>Folien</h1><div class="sub">${items.length} Folien · so wird die PowerPoint aussehen</div></div></div></header>
-  <main class="wrap wide" style="max-width:1180px"><div class="slides-strip">
+  <main class="wrap wide"><div class="slides-strip">
     ${items.map(it => `<div ${it.id ? `data-act="step" data-id="${it.id}" style="cursor:pointer"` : ''}>${slideHTML(it.lay)}
       <div class="small" style="margin:6px 2px"><b>${esc(it.name)}</b>${it.lay.warnings.map(w => `<div class="warnbox" style="margin-top:6px">⚠ ${esc(w)}</div>`).join('')}</div></div>`).join('')}
   </div></main>
@@ -738,6 +768,7 @@ document.addEventListener('click', async e => {
     case 'pmenu': e.stopPropagation(); return projectMenu(id);
     case 'import': return $('#pick-backup').click();
     case 'import-pptx': return $('#pick-pptx').click();
+    case 'fullscreen': return toggleFullscreen();
     case 'legacy-import': return importLegacy();
     case 'legacy-hide': localStorage.setItem('fw4.legacyDone', '1'); S.legacy = null; return renderHome();
     case 'home': return go('#/');
@@ -815,6 +846,23 @@ $('#pick-pptx').addEventListener('change', e => { const f = e.target.files[0]; e
 document.addEventListener('dragover', e => { if (S.route.view === 'step') e.preventDefault(); });
 document.addEventListener('drop', e => { if (S.route.view !== 'step') return; e.preventDefault(); const st = curStep(); addFiles(e.dataTransfer.files, st); if (S.route.tab !== 'fotos') go(`#/p/${S.P.id}/s/${st.id}/fotos`); });
 document.addEventListener('paste', e => { if (S.route.view !== 'step') return; const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/')); if (files.length) { e.preventDefault(); addFiles(files, curStep()); } });
+
+/* ================= Vollbild (PC) ================= */
+const fsOK = () => !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+function fsIcon() { return document.fullscreenElement || document.webkitFullscreenElement ? '🗗' : '⛶'; }
+function addFsButton() {
+  const bar = $('.top-in'); if (!bar || !fsOK() || $('.fs-btn', bar)) return;
+  const b = document.createElement('button');
+  b.className = 'icon-btn fs-btn'; b.dataset.act = 'fullscreen'; b.title = 'Vollbild ein/aus (F11)'; b.setAttribute('aria-label', 'Vollbild');
+  b.textContent = fsIcon(); bar.appendChild(b);
+}
+function toggleFullscreen() {
+  const d = document, el = d.documentElement;
+  if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+  else { const r = (el.requestFullscreen || el.webkitRequestFullscreen).call(el); if (r && r.catch) r.catch(() => toast('Vollbild nicht möglich – F11 drücken.')); }
+}
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => { $$('.fs-btn').forEach(b => b.textContent = fsIcon()); fitSlides(); }));
+new MutationObserver(addFsButton).observe($('#app'), { childList: true });
 
 /* ================= Start ================= */
 (async function init() {
