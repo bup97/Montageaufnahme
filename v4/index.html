@@ -218,12 +218,14 @@ label.f{display:block;font-size:13px;font-weight:600;color:var(--ink2);margin:0 
 <div id="app"></div>
 <input type="file" id="pick-camera" accept="image/*" capture="environment" multiple hidden>
 <input type="file" id="pick-gallery" accept="image/*" multiple hidden>
-<input type="file" id="pick-backup" accept=".json,application/json" hidden>
+<input type="file" id="pick-backup" accept=".json,application/json,.pptx" hidden>
+<input type="file" id="pick-pptx" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden>
 <script src="js/layout.js"></script>
 <script src="js/db.js"></script>
 <script src="js/annotate.js"></script>
 <script src="js/media.js"></script>
 <script src="js/export.js"></script>
+<script src="js/pptx-import.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>
