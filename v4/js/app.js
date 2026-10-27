@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.2.0';
+const VERSION = '5.2.1';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -450,7 +450,7 @@ function slideHTML(lay, { highlight } = {}) {
     if (e.type === 'table') {
       return `<table class="sl-tab" style="left:${px(e.x)};top:${px(e.y)};width:${px(e.w)};border:0">
         <colgroup>${e.colW.map(w => `<col style="width:${px(w)}">`).join('')}</colgroup>
-        ${e.rows.map((r, ri) => `<tr style="height:${px(e.rowH[ri])}">${r.map(c => `<td style="font-size:${pt(c.o.fontSize)};${c.o.bold ? 'font-weight:700;' : ''}color:#${c.o.color};background:#${c.o.fill};text-align:${c.o.align || 'left'};border:${(e.border.pt * 1.33).toFixed(1)}px solid #${e.border.color}">${esc(c.text)}</td>`).join('')}</tr>`).join('')}
+        ${e.rows.map((r, ri) => `<tr style="height:${px(e.rowH[ri])}">${r.map(c => `<td style="padding:${e.margin ? `${px(e.margin[0])} ${px(e.margin[1])}` : '0 5px'};font-size:${pt(c.o.fontSize)};${c.o.bold ? 'font-weight:700;' : ''}color:#${c.o.color};background:#${c.o.fill};text-align:${c.o.align || 'left'};border:${(e.border.pt * 1.33).toFixed(1)}px solid #${e.border.color}">${esc(c.text)}</td>`).join('')}</tr>`).join('')}
       </table>`;
     }
     return '';
