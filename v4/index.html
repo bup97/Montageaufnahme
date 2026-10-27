@@ -203,12 +203,42 @@ label.f{display:block;font-size:13px;font-weight:600;color:var(--ink2);margin:0 
 .dot.on{border-color:#fff}
 
 /* Desktop: Editor mit fester Vorschau */
+/* PC: ganze Bildschirmbreite nutzen */
+.fs-btn{display:none}
+@media(min-width:1040px) and (pointer:fine){.fs-btn{display:inline-grid;margin-left:auto}}
+.home-actions{display:grid;gap:10px}
 @media(min-width:1040px){
-  .wrap.wide{max-width:1180px}
-  .editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:24px;align-items:start}
-  .editor .side{position:sticky;top:calc(80px + var(--safe-t))}
+  .top-in,.wrap,.wrap.wide,.bottom-in{max-width:none}
+  .top-in{padding:6px 24px}
+  .wrap{padding:24px 32px calc(110px + var(--safe-b))}
+  .bottom-in{justify-content:flex-end;padding:0 20px}
+  .bottom-in .btn{flex:0 0 auto;min-width:230px}
+  .home-actions{grid-template-columns:2fr 1fr;align-items:stretch}
+  .home-actions .btn{margin-top:0!important;min-height:100%!important}
+  .plist{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px}
+  .steps{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:12px}
+  .slides-strip{grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:20px}
+  .tabs{max-width:none}
+  .editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:32px;align-items:start}
+  .tabs .tab-prev{display:none!important}
+  .home-more .btn.block{width:auto;padding:0 28px}
+  .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:22px}
+  .pslide{display:flex;flex-direction:column;gap:8px;min-width:0}
+  .pslide-click{cursor:pointer;border-radius:6px;transition:box-shadow .15s,transform .15s}
+  .pslide-click:hover{box-shadow:0 0 0 3px var(--brand);transform:translateY(-1px)}
+  .pslide.label{opacity:.7}
+  .pslide .cap{display:flex;align-items:center;gap:8px;min-height:40px;padding:0 2px}
+  .pslide .cap .n{color:var(--brand);font-size:18px;min-width:18px}
+  .pslide .cap .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pslide.add{aspect-ratio:16/9;border:2px dashed #d6c0cb;background:var(--brand-soft);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;font-weight:600;color:var(--brand);font-size:16px}
+  .pslide.add span{font-size:40px;line-height:1}
+  .pslide.add:hover{border-color:var(--brand)}
+  .icon-btn.sm{width:38px;height:38px;font-size:15px;color:var(--ink2)}
+  .icon-btn:disabled{opacity:.25}
+  .editor .side{position:sticky;top:calc(124px + var(--safe-t))}
   .editor .tab-prev{display:none!important}
-  .photos{grid-template-columns:repeat(3,1fr)}
+  .photos{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
+  .wrap .card{padding:20px}
 }
 @media(max-width:1039px){.editor .side{display:none}}
 @media(max-width:380px){.rowlist .r.cables{grid-template-columns:1fr 1fr 40px}.rowlist .r.cables input:first-child{grid-column:1/-1}}
@@ -218,12 +248,14 @@ label.f{display:block;font-size:13px;font-weight:600;color:var(--ink2);margin:0 
 <div id="app"></div>
 <input type="file" id="pick-camera" accept="image/*" capture="environment" multiple hidden>
 <input type="file" id="pick-gallery" accept="image/*" multiple hidden>
-<input type="file" id="pick-backup" accept=".json,application/json" hidden>
+<input type="file" id="pick-backup" accept=".json,application/json,.pptx" hidden>
+<input type="file" id="pick-pptx" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden>
 <script src="js/layout.js"></script>
 <script src="js/db.js"></script>
 <script src="js/annotate.js"></script>
 <script src="js/media.js"></script>
 <script src="js/export.js"></script>
+<script src="js/pptx-import.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

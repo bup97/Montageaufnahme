@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.0.0';
+const VERSION = '5.1.0';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -232,7 +232,8 @@ async function renderHome() {
     ${leg ? `<div class="banner info" style="margin-bottom:14px"><b>Aufnahme aus der alten Version gefunden</b><br>
       <span class="small">${esc([leg.state.projectInfo?.customer, leg.state.projectInfo?.product, leg.state.projectInfo?.variant].filter(Boolean).join(' · ') || 'Ohne Angaben')} – ${leg.count} Schritt(e). Sie bleibt in der alten Version erhalten.</span>
       <div class="row" style="margin-top:10px"><button class="btn primary sm" data-act="legacy-import">Übernehmen</button><button class="btn ghost sm" data-act="legacy-hide">Ausblenden</button></div></div>` : ''}
-    <button class="hero" data-act="new"><span class="plus">+</span><span><b>Neue Montageanleitung</b><span class="muted small">Schritte mit Material, Anweisung und Fotos erfassen</span></span></button>
+    <div class="home-actions"><button class="hero" data-act="new"><span class="plus">+</span><span><b>Neue Montageanleitung</b><span class="muted small">Schritte mit Material, Anweisung und Fotos erfassen</span></span></button>
+    <button class="btn block" data-act="import-pptx" style="margin-top:10px;min-height:54px">📊 Bestehende PowerPoint importieren</button></div>
     <div class="sect">Meine Anleitungen</div>
     ${S.projects.length ? `<div class="plist">${S.projects.map((p, i) => {
       const photos = p.steps.reduce((a, s) => a + s.photoIds.length, 0);
@@ -244,7 +245,7 @@ async function renderHome() {
         <button class="icon-btn" data-act="pmenu" data-id="${p.id}" aria-label="Mehr">⋯</button></div>`;
     }).join('')}</div>` : `<div class="empty">Noch keine Anleitungen.<br>Tippe oben auf „Neue Montageanleitung“.</div>`}
     <div class="sect">Weiteres</div>
-    <div class="card stack">
+    <div class="card stack home-more">
       <button class="btn block" data-act="import">Sicherung oder JSON importieren</button>
       <div class="tiny" id="storage">Speicher wird ermittelt…</div>
       <div class="tiny">Version ${VERSION} · Daten bleiben auf diesem Gerät · <a href="../" style="color:inherit">alte Version öffnen</a> · Created by P. Busch</div>
@@ -260,7 +261,7 @@ async function storageInfo() {
   } catch (e) { const el = $('#storage'); if (el) el.textContent = ''; }
 }
 
-function projectForm(p, title, cta) {
+function projectForm(p, title, cta, note) {
   const v = p || { area: 'funkwerk', type: 'endmontage', customer: '', product: '', variant: '' };
   const areas = [
     ['funkwerk', 'endmontage', '🔧', 'Funkwerk Endmontage', '3 Label-Folien (EOL, VP, FA) am Ende'],
@@ -268,7 +269,7 @@ function projectForm(p, title, cta) {
     ['elexon', '', '⚡', 'Elexon', 'ohne Label-Folien']];
   const hist = k => [...new Set(S.projects.map(x => x[k]).filter(Boolean))].map(x => `<option value="${esc(x)}">`).join('');
   return new Promise(res => {
-    const sh = sheet(`<h2>${title}</h2>
+    const sh = sheet(`<h2>${title}</h2>${note ? `<div class="okbox" style="margin:-4px 0 14px">${note}</div>` : ''}
       <div class="opts">${areas.map(([a, t, ic, l, d]) => `<button class="opt ${v.area === a && (a === 'elexon' || v.type === t) ? 'on' : ''}" data-a="${a}" data-t="${t}"><span class="ic">${ic}</span><span><b>${l}</b><span class="small muted">${d}</span></span></button>`).join('')}</div>
       <div class="stack" style="margin-top:16px">
         <div><label class="f" for="f-c">Kunde</label><input id="f-c" list="h-c" value="${esc(v.customer)}" placeholder="z. B. Deutsche Bahn" autocomplete="off"><datalist id="h-c">${hist('customer')}</datalist></div>
@@ -358,6 +359,7 @@ function renderProject() {
   </div></header>
   <main class="wrap">
     ${totalWarn ? `<div class="warnbox" style="margin-bottom:12px">⚠ ${totalWarn} Folie${totalWarn > 1 ? 'n' : ''} bitte prüfen – Schritt öffnen oder „Folien ansehen“.</div>` : ''}
+    ${isDesk() ? projectGrid(p, labels) : `
     <div class="steps">
       ${labels.start.map(labelCard).join('')}
       ${p.steps.map((s, i) => {
@@ -380,12 +382,36 @@ function renderProject() {
       ${labels.end.map(labelCard).join('')}
     </div>
     ${p.steps.length ? '' : '<div class="empty">Noch keine Schritte.</div>'}
-    <div class="row" style="margin-top:14px"><button class="btn block" data-act="add-step">+ Schritt hinzufügen</button></div>
+    <div class="row" style="margin-top:14px"><button class="btn block" data-act="add-step">+ Schritt hinzufügen</button></div>`}
   </main>
   <div class="bottom"><div class="bottom-in">
     <button class="btn" data-act="slides">Folien ansehen</button>
     <button class="btn primary" data-act="export">Exportieren</button>
   </div></div>`;
+  requestAnimationFrame(() => fitSlides());
+}
+
+/* PC: jeder Schritt als große Folienvorschau */
+const isDesk = () => matchMedia('(min-width:1040px)').matches;
+function projectGrid(p, labels) {
+  const lab = l => `<div class="pslide label">${slideHTML(Layout.layoutLabelSlide(l))}<div class="cap"><span class="chip">🏷 Label-Folie</span><span class="tiny">wird automatisch erzeugt</span></div></div>`;
+  return `<div class="pgrid">
+    ${labels.start.map(lab).join('')}
+    ${p.steps.map((s, i) => {
+      const lay = Layout.layoutStepSlide(s, i + 1, metasOf(s));
+      return `<div class="pslide">
+        <div data-act="step" data-id="${s.id}" class="pslide-click" title="Schritt bearbeiten">${slideHTML(lay)}</div>
+        <div class="cap"><b class="n">${i + 1}</b><span class="t">${esc(Layout.stepTitle(s, i + 1))}</span>
+          ${s.isScanStep ? '<span class="chip scan">Scan</span>' : ''}${lay.warnings.length ? `<span class="chip warn" title="${esc(lay.warnings.join(' '))}">⚠ prüfen</span>` : ''}
+          <span class="grow"></span>
+          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne">◀</button>
+          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten">▶</button>
+          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten">✎</button></div>
+      </div>`;
+    }).join('')}
+    <button class="pslide add" data-act="add-step"><span>+</span>Schritt hinzufügen</button>
+    ${labels.end.map(lab).join('')}
+  </div>`;
 }
 
 function moveStep(id, d) {
@@ -428,7 +454,12 @@ function slideHTML(lay, { highlight } = {}) {
   return `<div class="slide"><div class="slide-in">${parts.join('')}</div></div>`;
 }
 function fitSlides(root = document) { $$('.slide', root).forEach(s => s.style.setProperty('--s', (s.clientWidth / 1280).toFixed(4))); }
-addEventListener('resize', () => fitSlides());
+let lastDesk = matchMedia('(min-width:1040px)').matches;
+addEventListener('resize', () => {
+  fitSlides();
+  const d = matchMedia('(min-width:1040px)').matches;
+  if (d !== lastDesk) { lastDesk = d; if (S.route.view === 'project') renderProject(); if (S.route.view === 'step') renderStep(); }
+});
 
 function renderSlides() {
   const p = S.P, labels = Layout.labelsFor(p);
@@ -440,7 +471,7 @@ function renderSlides() {
   $('#app').innerHTML = `
   <header class="top"><div class="top-in"><button class="icon-btn" data-act="back-project" aria-label="Zurück">‹</button>
     <div class="grow"><h1>Folien</h1><div class="sub">${items.length} Folien · so wird die PowerPoint aussehen</div></div></div></header>
-  <main class="wrap wide" style="max-width:1180px"><div class="slides-strip">
+  <main class="wrap wide"><div class="slides-strip">
     ${items.map(it => `<div ${it.id ? `data-act="step" data-id="${it.id}" style="cursor:pointer"` : ''}>${slideHTML(it.lay)}
       <div class="small" style="margin:6px 2px"><b>${esc(it.name)}</b>${it.lay.warnings.map(w => `<div class="warnbox" style="margin-top:6px">⚠ ${esc(w)}</div>`).join('')}</div></div>`).join('')}
   </div></main>
@@ -663,7 +694,38 @@ function exportSheet() {
 function dataURLtoBlob(d) { return fetch(d).then(r => r.blob()); }
 async function thumbFrom(blob) { const { img, url } = await loadImage(blob); const t = await scaleTo(img, 560, 0.78); URL.revokeObjectURL(url); return t; }
 
+/* Bestehende Anleitung aus PowerPoint (Funkwerk-Layout) übernehmen */
+async function importPptx(file) {
+  if (!/\.pptx$/i.test(file.name) && !/presentationml/.test(file.type)) return toast('Bitte eine PowerPoint-Datei (.pptx) wählen. Alte .ppt-Dateien vorher in PowerPoint als .pptx speichern.');
+  let res; const stop = busy('PowerPoint wird gelesen…');
+  try { res = await PptxImport.parse(file); }
+  catch (e) { console.error(e); stop(); return toast('Import fehlgeschlagen: ' + e.message); }
+  stop();
+  try {
+    if (!res.stats.steps) return toast('Keine Arbeitsschritte im Funkwerk-Layout gefunden.');
+    const i = res.info;
+    const pre = { area: i.productionArea, type: i.funkwerkType || 'endmontage', customer: i.customer, product: i.product, variant: i.variant };
+    const st = res.stats;
+    const note = `✓ Erkannt: ${st.steps} Schritt${st.steps !== 1 ? 'e' : ''}, ${st.photos} Foto${st.photos !== 1 ? 's' : ''}` +
+      (st.labels ? `, ${st.labels} Label-Folie${st.labels !== 1 ? 'n' : ''} (erzeugt die App selbst)` : '') + (st.skipped ? ` · ${st.skipped} Folie(n) ohne passendes Layout übersprungen` : '');
+    await renderHomeData();
+    const r = await projectForm(pre, 'PowerPoint importieren', 'Importieren', note);
+    if (!r) return;
+    const stop2 = busy('Schritte und Fotos werden übernommen…');
+    try {
+      const p = await fromLegacy({ customer: r.customer, product: r.product, variant: r.variant, productionArea: r.area, funkwerkType: r.type }, res.steps, async ph => ph.data);
+      await DB.putProject(p);
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+      toast('Importiert: ' + pTitle(p));
+      go(`#/p/${p.id}`);
+    } finally { stop2(); }
+  } catch (e) { console.error(e); toast('Import fehlgeschlagen: ' + e.message); }
+  finally { res.release(); }
+}
+async function renderHomeData() { if (!S.projects.length) S.projects = (await DB.allProjects()).filter(p => !p.hidden); }
+
 async function importFile(file) {
+  if (/\.pptx$/i.test(file.name)) return importPptx(file);
   const stop = busy('Wird importiert…');
   try {
     const data = JSON.parse(await file.text());
@@ -702,6 +764,7 @@ async function fromLegacy(info, steps, photoData) {
   for (const o of steps) {
     const s = emptyStep();
     s.instructions = String(o.instructions || '').replace(/\n*📋 Verkabelungsplan:[\s\S]*$/, '').trim();
+    s.title = o.title || '';
     s.warning = o.warning || o.importantNotes || '';
     s.isScanStep = !!o.isScanStep;
     s.materials = (o.materials || []).filter(m => m.number).map(m => ({ number: String(m.number), description: m.description && m.description !== m.number ? m.description : '', quantity: parseInt(m.quantity, 10) || 1 }));
@@ -757,6 +820,8 @@ document.addEventListener('click', async e => {
     case 'open': if (e.target.closest('[data-act="pmenu"]')) return; return go(`#/p/${id}`);
     case 'pmenu': e.stopPropagation(); return projectMenu(id);
     case 'import': return $('#pick-backup').click();
+    case 'import-pptx': return $('#pick-pptx').click();
+    case 'fullscreen': return toggleFullscreen();
     case 'legacy-import': return importLegacy();
     case 'legacy-hide': localStorage.setItem('fw4.legacyDone', '1'); S.legacy = null; return renderHome();
     case 'home': return go('#/');
@@ -832,9 +897,27 @@ document.addEventListener('keydown', e => {
 });
 ['#pick-camera', '#pick-gallery'].forEach(sel => $(sel).addEventListener('change', e => { const st = curStep(); const f = [...e.target.files]; e.target.value = ''; addFiles(f, st); }));
 $('#pick-backup').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) importFile(f); });
+$('#pick-pptx').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) importPptx(f); });
 document.addEventListener('dragover', e => { if (S.route.view === 'step') e.preventDefault(); });
 document.addEventListener('drop', e => { if (S.route.view !== 'step') return; e.preventDefault(); const st = curStep(); addFiles(e.dataTransfer.files, st); if (S.route.tab !== 'fotos') go(`#/p/${S.P.id}/s/${st.id}/fotos`); });
 document.addEventListener('paste', e => { if (S.route.view !== 'step') return; const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/')); if (files.length) { e.preventDefault(); addFiles(files, curStep()); } });
+
+/* ================= Vollbild (PC) ================= */
+const fsOK = () => !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+function fsIcon() { return document.fullscreenElement || document.webkitFullscreenElement ? '🗗' : '⛶'; }
+function addFsButton() {
+  const bar = $('.top-in'); if (!bar || !fsOK() || $('.fs-btn', bar)) return;
+  const b = document.createElement('button');
+  b.className = 'icon-btn fs-btn'; b.dataset.act = 'fullscreen'; b.title = 'Vollbild ein/aus (F11)'; b.setAttribute('aria-label', 'Vollbild');
+  b.textContent = fsIcon(); bar.appendChild(b);
+}
+function toggleFullscreen() {
+  const d = document, el = d.documentElement;
+  if (d.fullscreenElement || d.webkitFullscreenElement) (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+  else { const r = (el.requestFullscreen || el.webkitRequestFullscreen).call(el); if (r && r.catch) r.catch(() => toast('Vollbild nicht möglich – F11 drücken.')); }
+}
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => { $$('.fs-btn').forEach(b => b.textContent = fsIcon()); fitSlides(); }));
+new MutationObserver(addFsButton).observe($('#app'), { childList: true });
 
 /* ================= Start ================= */
 (async function init() {
