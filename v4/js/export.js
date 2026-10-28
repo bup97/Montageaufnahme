@@ -40,7 +40,7 @@ const Export = (() => {
         if (data) slide.addImage({ data, x: e.x, y: e.y, w: e.w, h: e.h });
       } else if (e.type === 'table') {
         const rows = e.rows.map(r => r.map(c => ({ text: c.text, options: { ...c.o, color: c.o.color, fill: c.o.fill ? { color: c.o.fill } : undefined, fontFace: 'Calibri', valign: 'middle' } })));
-        slide.addTable(rows, { x: e.x, y: e.y, w: e.w, colW: e.colW, rowH: e.rowH, border: e.border, margin: 0.05, autoPage: false });
+        slide.addTable(rows, { x: e.x, y: e.y, w: e.w, colW: e.colW, rowH: e.rowH, border: e.border, margin: e.margin || 0.05, autoPage: false });
       }
     });
   }

@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '4.1.1';
+const VERSION = '5.3.0';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -52,12 +52,38 @@ function busy(text) {
 }
 function sheet(html, { onClose } = {}) {
   const back = document.createElement('div'); back.className = 'sheet-back';
-  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div>`;
-  const close = () => { back.remove(); onClose && onClose(); };
+  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" tabindex="-1"><div class="grab"></div>${html}</div>`;
+  const prevFocus = document.activeElement;
+  let closed = false;
+  const close = () => {
+    if (closed) return; closed = true; back.remove(); onClose && onClose();
+    if (prevFocus && prevFocus.isConnected && !isTouch) try { prevFocus.focus({ preventScroll: true }); } catch (e) {}
+  };
+  back._close = close;
   back.addEventListener('click', e => { if (e.target === back || e.target.closest('[data-close]')) close(); });
   document.body.appendChild(back);
-  return { el: back.querySelector('.sheet'), close };
+  const el = back.querySelector('.sheet');
+  const h = el.querySelector('h2'); if (h) el.setAttribute('aria-label', h.textContent.trim());
+  // Tastatur: Fokus in den Dialog, Tab bleibt im Dialog
+  if (!isTouch) requestAnimationFrame(() => { if (!el.contains(document.activeElement)) el.focus({ preventScroll: true }); });
+  el.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const f = $$('button:not([disabled]), input:not([disabled]):not([type=hidden]), select, textarea, a[href], label.opt', el).filter(x => x.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === el)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+  return { el, close };
 }
+/* Esc schließt den obersten Dialog bzw. Kamera/Markieren */
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const ann = $('.ann'); if (ann) { const b = $('[data-a="cancel"]', ann); if (b) { e.preventDefault(); b.click(); } return; }
+  const cam = $('.sheet-back.cam'); if (cam) { const b = $('[data-x]', cam); if (b) { e.preventDefault(); b.click(); } return; }
+  const backs = $$('.sheet-back'); const top = backs[backs.length - 1];
+  if (top) { e.preventDefault(); if (top._close) top._close(); else top.remove(); }
+});
 function menu(items) {
   return new Promise(res => {
     const sh = sheet(`<div class="menu">${items.map((it, i) => `<button data-i="${i}" class="${it.danger ? 'danger' : ''}"><span class="ic">${it.icon}</span>${esc(it.label)}</button>`).join('')}</div>
@@ -157,6 +183,9 @@ async function route() {
         renderStep();
       } else if (h[2] === 'folien') { S.route = { view: 'slides', id: p.id }; renderSlides(); }
       else { S.route = { view: 'project', id: p.id }; renderProject(); }
+    } else if (h[0] === 'cad') {
+      await flush(); S.P = null; dropThumbs();
+      S.route = { view: 'cad' }; await renderCad();
     } else {
       await flush(); S.P = null; dropThumbs();
       S.route = { view: 'home' }; await renderHome();
@@ -166,6 +195,55 @@ async function route() {
 }
 
 /* ================= Startseite ================= */
+function homeTabs(active) {
+  return `<div class="seg" role="tablist" style="margin-bottom:14px">
+    <button role="tab" class="${active === 'home' ? 'on' : ''}" data-act="nav-home">📋 Meine Anleitungen</button>
+    <button role="tab" class="${active === 'cad' ? 'on' : ''}" data-act="nav-cad">🧊 Aus CAD erstellen</button></div>`;
+}
+
+/* ================= Reiter „Aus CAD erstellen“ ================= */
+let cadModule = null;
+async function renderCad() {
+  $('#app').innerHTML = `
+  <header class="top"><div class="top-in"><div class="brandbar"><img src="img/logo.png" alt="funkwerk"><span>Montage-Recorder</span></div></div></header>
+  <main class="wrap cad-wrap">
+    ${homeTabs('cad')}
+    <div id="cad-root"><div class="empty"><span class="spin" style="display:inline-block"></span><br>Wird geladen…</div></div>
+  </main>`;
+  try {
+    if (!cadModule) cadModule = await import('./cad.js');
+    if (S.route.view !== 'cad') return;
+    cadModule.mount($('#cad-root'), { toast, busy, projectForm: async (v, title, cta) => { S.projects = await DB.allProjects(); return projectForm(v, title, cta); }, createFromCad });
+  } catch (e) {
+    console.error(e);
+    $('#cad-root').innerHTML = `<div class="banner">Der CAD-Reiter konnte nicht geladen werden (${esc(e.message)}). Beim ersten Öffnen wird eine Internetverbindung benötigt.</div>`;
+  }
+}
+/* Ergebnis aus dem CAD-Reiter als normale Anleitung anlegen */
+async function createFromCad(info, cadSteps) {
+  const now = Date.now();
+  const p = { id: uid(), ...info, createdAt: now, updatedAt: now, createdAtText: new Date(now).toLocaleString('de-DE'), steps: [], v: 4, source: 'cad' };
+  for (const c of cadSteps) {
+    const s = emptyStep();
+    s.title = c.title || '';
+    s.instructions = c.instructions || '';
+    s.warning = c.warning || '';
+    s.materials = (c.materials || []).map(m => ({ number: m.number, description: m.description || '', quantity: m.quantity || 1 }));
+    s.tools = c.tools || [];
+    s.cables = c.cables || [];
+    if (c.image) {
+      const { img, url } = await loadImage(c.image.blob);
+      const th = await scaleTo(img, 560, 0.78); URL.revokeObjectURL(url);
+      const rec = { id: uid(), projectId: p.id, blob: c.image.blob, thumb: th.blob, w: c.image.w, h: c.image.h, createdAt: new Date().toISOString() };
+      await DB.putPhoto(rec); s.photoIds.push(rec.id);
+    }
+    p.steps.push(s);
+  }
+  await DB.putProject(p);
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  toast('Anleitung angelegt: ' + p.steps.length + ' Schritte');
+  go(`#/p/${p.id}`);
+}
 async function renderHome() {
   S.projects = (await DB.allProjects()).filter(p => !p.hidden && !S.pending.has(p.id)).sort((a, b) => b.updatedAt - a.updatedAt);
   const firstThumb = async p => { const s = p.steps.find(s => s.photoIds.length); if (!s) return ''; const ph = await DB.getPhoto(s.photoIds[0]); return ph ? URL.createObjectURL(ph.thumb || ph.blob) : ''; };
@@ -176,6 +254,7 @@ async function renderHome() {
   $('#app').innerHTML = `
   <header class="top"><div class="top-in"><div class="brandbar"><img src="img/logo.png" alt="funkwerk"><span>Montage-Recorder</span></div></div></header>
   <main class="wrap">
+    ${homeTabs('home')}
     ${leg ? `<div class="banner info" style="margin-bottom:14px"><b>Aufnahme aus der alten Version gefunden</b><br>
       <span class="small">${esc([leg.state.projectInfo?.customer, leg.state.projectInfo?.product, leg.state.projectInfo?.variant].filter(Boolean).join(' · ') || 'Ohne Angaben')} – ${leg.count} Schritt(e). Sie bleibt in der alten Version erhalten.</span>
       <div class="row" style="margin-top:10px"><button class="btn primary sm" data-act="legacy-import">Übernehmen</button><button class="btn ghost sm" data-act="legacy-hide">Ausblenden</button></div></div>` : ''}
@@ -188,14 +267,18 @@ async function renderHome() {
         <div class="thumb" style="${thumbs[i] ? `background-image:url('${thumbs[i]}')` : ''}">${thumbs[i] ? '' : '📋'}</div>
         <div class="grow" style="min-width:0"><div class="t">${esc(pTitle(p))}</div>
           <div class="m">${esc(pSub(p)) || '&nbsp;'}</div>
-          <div class="chips"><span class="chip brand">${esc(Layout.areaLabel(p))}</span><span class="chip">${p.steps.length} Schritt${p.steps.length !== 1 ? 'e' : ''}</span><span class="chip">📷 ${photos}</span><span class="chip">${relTime(p.updatedAt)}</span></div></div>
+          <div class="chips"><span class="chip brand">${esc(Layout.areaLabel(p))}</span><span class="meta">${p.steps.length} Schritt${p.steps.length !== 1 ? 'e' : ''}, ${photos} Foto${photos !== 1 ? 's' : ''} · ${relTime(p.updatedAt)}</span></div></div>
         <button class="icon-btn" data-act="pmenu" data-id="${p.id}" aria-label="Mehr">⋯</button></div>`;
     }).join('')}</div>` : `<div class="empty">Noch keine Anleitungen.<br>Tippe oben auf „Neue Montageanleitung“.</div>`}
-    <div class="sect">Weiteres</div>
+    <div class="sect">Handy ↔ PC übertragen</div>
     <div class="card stack home-more">
-      <button class="btn block" data-act="import">Sicherung oder JSON importieren</button>
+      <div class="sync-row">
+        <button class="btn primary" data-act="sync-out" ${S.projects.length ? '' : 'disabled'}>⤴ Anleitungen übertragen</button>
+        <button class="btn" data-act="import">⤵ Übertragung einlesen</button>
+      </div>
+      <div class="small muted">Am Handy <b>„Anleitungen übertragen“</b> → in OneDrive sichern (oder per Mail/AirDrop senden). Am PC <b>„Übertragung einlesen“</b> → dieselbe Datei wählen. Vorhandene Anleitungen werden aktualisiert, nicht verdoppelt.${lastSync() ? ` · Zuletzt übertragen: ${relTime(lastSync())}` : ''}</div>
       <div class="tiny" id="storage">Speicher wird ermittelt…</div>
-      <div class="tiny">Version ${VERSION} · Daten bleiben auf diesem Gerät · <a href="../" style="color:inherit">alte Version öffnen</a> · Created by P. Busch</div>
+      <div class="tiny">Version ${VERSION} · Daten bleiben auf diesem Gerät · <a href="../" class="footlink">alte Version öffnen</a> · Created by P. Busch</div>
     </div>
   </main>`;
   storageInfo();
@@ -204,7 +287,8 @@ async function storageInfo() {
   try {
     const e = await navigator.storage.estimate();
     const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false;
-    const el = $('#storage'); if (el) el.textContent = `Belegt: ${(e.usage / 1048576).toFixed(1)} MB von ${(e.quota / 1048576 / 1024).toFixed(1)} GB${persisted ? ' · dauerhaft gespeichert' : ''}`;
+    const fmt = b => b >= 1073741824 ? (b / 1073741824).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + ' GB' : (b / 1048576).toLocaleString('de-DE', { maximumFractionDigits: b < 10485760 ? 1 : 0 }) + ' MB';
+    const el = $('#storage'); if (el) el.textContent = `Belegt: ${fmt(e.usage)} von ${fmt(e.quota)}${persisted ? ' · dauerhaft gespeichert' : ''}`;
   } catch (e) { const el = $('#storage'); if (el) el.textContent = ''; }
 }
 
@@ -254,7 +338,7 @@ async function projectMenu(id) {
   menu([
     { icon: '✎', label: 'Angaben bearbeiten', run: () => editInfo(p) },
     { icon: '⧉', label: 'Duplizieren (z. B. für neue Variante)', run: () => duplicateProject(p) },
-    { icon: '⤓', label: 'Sicherung exportieren', run: () => runExport(p, 'backup') },
+    { icon: '⤴', label: 'Übertragen / sichern', run: () => runExport(p, 'backup') },
     { icon: '🗑', label: 'Löschen', danger: true, run: () => deleteProject(p) }
   ]);
 }
@@ -324,6 +408,7 @@ function renderProject() {
             </div>
           </div>
           <div class="mv"><button data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
+          <button class="x sdel" data-act="sdel" data-id="${s.id}" aria-label="Schritt ${i + 1} löschen" title="Schritt löschen">🗑</button>
         </div>`;
       }).join('')}
       ${labels.end.map(labelCard).join('')}
@@ -351,9 +436,10 @@ function projectGrid(p, labels) {
         <div class="cap"><b class="n">${i + 1}</b><span class="t">${esc(Layout.stepTitle(s, i + 1))}</span>
           ${s.isScanStep ? '<span class="chip scan">Scan</span>' : ''}${lay.warnings.length ? `<span class="chip warn" title="${esc(lay.warnings.join(' '))}">⚠ prüfen</span>` : ''}
           <span class="grow"></span>
-          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne">◀</button>
-          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten">▶</button>
-          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten">✎</button></div>
+          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne" aria-label="Schritt ${i + 1} nach vorne">◀</button>
+          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten" aria-label="Schritt ${i + 1} nach hinten">▶</button>
+          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten" aria-label="Schritt ${i + 1} bearbeiten">✎</button>
+          <button class="icon-btn sm sdel" data-act="sdel" data-id="${s.id}" title="Schritt löschen" aria-label="Schritt ${i + 1} löschen">🗑</button></div>
       </div>`;
     }).join('')}
     <button class="pslide add" data-act="add-step"><span>+</span>Schritt hinzufügen</button>
@@ -393,7 +479,7 @@ function slideHTML(lay, { highlight } = {}) {
     if (e.type === 'table') {
       return `<table class="sl-tab" style="left:${px(e.x)};top:${px(e.y)};width:${px(e.w)};border:0">
         <colgroup>${e.colW.map(w => `<col style="width:${px(w)}">`).join('')}</colgroup>
-        ${e.rows.map((r, ri) => `<tr style="height:${px(e.rowH[ri])}">${r.map(c => `<td style="font-size:${pt(c.o.fontSize)};${c.o.bold ? 'font-weight:700;' : ''}color:#${c.o.color};background:#${c.o.fill};text-align:${c.o.align || 'left'};border:${(e.border.pt * 1.33).toFixed(1)}px solid #${e.border.color}">${esc(c.text)}</td>`).join('')}</tr>`).join('')}
+        ${e.rows.map((r, ri) => `<tr style="height:${px(e.rowH[ri])}">${r.map(c => `<td style="padding:${e.margin ? `${px(e.margin[0])} ${px(e.margin[1])}` : '0 5px'};font-size:${pt(c.o.fontSize)};${c.o.bold ? 'font-weight:700;' : ''}color:#${c.o.color};background:#${c.o.fill};text-align:${c.o.align || 'left'};border:${(e.border.pt * 1.33).toFixed(1)}px solid #${e.border.color}">${esc(c.text)}</td>`).join('')}</tr>`).join('')}
       </table>`;
     }
     return '';
@@ -436,8 +522,8 @@ function renderStep() {
   const wide = matchMedia('(min-width:1040px)').matches;
   const tabIdx = TABS.findIndex(t => t[0] === tab);
   let secondary = ['Fertig', 'done'], primary;
-  if (tab === 'material') primary = ['Weiter: Anweisung →', 'tab:anweisung'];
-  else if (tab === 'anweisung') primary = ['Weiter: Fotos →', 'tab:fotos'];
+  if (tab === 'material') primary = ['Weiter: Anweisung', 'tab:anweisung'];
+  else if (tab === 'anweisung') primary = ['Weiter: Fotos', 'tab:fotos'];
   else if (tab === 'fotos' && !wide) { secondary = ['Vorschau', 'tab:vorschau']; primary = ['+ Nächster Schritt', 'next']; }
   else primary = ['+ Nächster Schritt', 'next'];
 
@@ -445,6 +531,7 @@ function renderStep() {
   <header class="top"><div class="top-in">
     <button class="icon-btn" data-act="back-project" aria-label="Zur Übersicht">‹</button>
     <div class="grow" style="min-width:0"><h1>Schritt ${n} <span class="muted" style="font-weight:500">von ${p.steps.length}</span></h1><div class="sub">${esc(pTitle(p))}</div></div>
+    <button class="icon-btn sdel" data-act="sdel-cur" aria-label="Schritt löschen" title="Schritt löschen">🗑</button>
     <button class="icon-btn" data-act="smenu" aria-label="Mehr">⋯</button>
   </div></header>
   <main class="wrap wide">
@@ -486,8 +573,8 @@ function tabBody(tab, s, n) {
     <div class="sect">Material in diesem Schritt (${s.materials.length})</div>
     <div class="stack">${s.materials.length ? s.materials.map((m, i) => `
       <div class="mat"><div class="grow" style="min-width:0"><div class="no">${esc(m.number)}</div>
-        <input data-f="materials.${i}.description" value="${esc(m.description)}" placeholder="Bezeichnung" style="border:0;padding:2px 0;min-height:30px;font-size:14px;color:var(--ink2)"></div>
-        <div class="qty sm"><button data-act="mi:${i}:-1">−</button><input data-f="materials.${i}.quantity" type="number" inputmode="numeric" min="1" value="${m.quantity}"><button data-act="mi:${i}:1">+</button></div>
+        <input class="mdesc" data-f="materials.${i}.description" value="${esc(m.description)}" placeholder="Bezeichnung ergänzen" aria-label="Bezeichnung zu ${esc(m.number)}"></div>
+        <div class="qty sm"><button data-act="mi:${i}:-1" aria-label="Menge ${esc(m.number)} verringern">−</button><input data-f="materials.${i}.quantity" type="number" inputmode="numeric" min="1" value="${m.quantity}" aria-label="Menge ${esc(m.number)}"><button data-act="mi:${i}:1" aria-label="Menge ${esc(m.number)} erhöhen">+</button></div>
         <button class="x" data-act="mat-del:${i}" aria-label="Entfernen">×</button></div>`).join('') : '<div class="empty" style="padding:18px">Kein Material – Schritt geht auch ohne.</div>'}
       ${s.materials.length > 5 ? '<div class="warnbox">Viele Positionen: die Tabelle schiebt die Anweisung auf der Folie nach unten.</div>' : ''}
     </div>`;
@@ -606,15 +693,88 @@ async function runExport(p, kind) {
     if (kind === 'pptx') file = await Export.buildPptx(project, getPhoto);
     if (kind === 'csv') { if (!Export.bom(project).length) { stop(); return toast('Keine Materialien erfasst.'); } file = Export.bomCSV(project); }
     if (kind === 'json') file = await Export.converterJSON(project, getPhoto);
-    if (kind === 'backup') file = await Export.backup(project, getPhoto);
+    if (kind === 'backup') { file = await Sync.build([project], { getPhoto, appVersion: VERSION }); markSynced(); }
   } catch (e) { console.error(e); stop(); return toast('Export fehlgeschlagen: ' + e.message); }
   stop();
+  deliverSheet(file, kind === 'backup' ? syncHint() : '');
+}
+function deliverSheet(file, hint) {
   const mb = (file.blob.size / 1048576).toFixed(1);
   const canShare = !!(navigator.canShare && navigator.canShare({ files: [new File([file.blob], file.name, { type: file.type })] }));
   const sh = sheet(`<h2>Fertig ✓</h2><p class="muted" style="word-break:break-all;margin-top:-6px">${esc(file.name)} · ${mb} MB</p>
+    ${hint ? `<div class="banner info small" style="margin-bottom:12px">${hint}</div>` : ''}
     <button class="btn primary block" data-go style="min-height:56px">${canShare ? 'Teilen / In Dateien sichern' : 'Herunterladen'}</button>
     <button class="btn block" data-close style="margin-top:10px">Schließen</button>`);
   $('[data-go]', sh.el).onclick = async () => { const r = await Export.deliver(file); if (r !== 'aborted') sh.close(); };
+}
+
+/* ================= Übertragen Handy ↔ PC ================= */
+const lastSync = () => { try { return +localStorage.getItem('fw.lastSync') || 0; } catch (e) { return 0; } };
+const markSynced = () => { try { localStorage.setItem('fw.lastSync', String(Date.now())); } catch (e) {} };
+const syncHint = () => isTouch
+  ? '<b>Weiter am PC:</b> Hier „Teilen“ → <b>OneDrive</b> (oder Mail an dich). Am PC in der App „Übertragung einlesen“ → Datei aus OneDrive/Downloads wählen.'
+  : '<b>Weiter am Handy:</b> Datei in OneDrive speichern. Am Handy in der App „Übertragung einlesen“ → Datei aus der Dateien-App wählen.';
+
+async function syncOut() {
+  const all = (await DB.allProjects()).filter(p => !p.hidden).sort((a, b) => b.updatedAt - a.updatedAt);
+  if (!all.length) return toast('Noch keine Anleitungen vorhanden.');
+  const since = lastSync();
+  const photosOf = p => p.steps.reduce((a, s) => a + s.photoIds.length, 0);
+  const sh = sheet(`<h2>Anleitungen übertragen</h2>
+    <div class="row small" style="margin:-6px 0 10px;gap:14px"><button class="btn ghost sm" data-sel="all">Alle</button>${since ? '<button class="btn ghost sm" data-sel="changed">Nur seit letzter Übertragung geändert</button>' : ''}<button class="btn ghost sm" data-sel="none">Keine</button></div>
+    <div class="opts sync-list">${all.map(p => `<label class="opt"><input type="checkbox" value="${p.id}" checked style="width:22px;height:22px;min-height:0;flex:none">
+      <span class="grow" style="min-width:0"><b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pTitle(p))}</b><span class="small muted">${esc(pSub(p)) ? esc(pSub(p)) + ' · ' : ''}${p.steps.length} Schritte · 📷 ${photosOf(p)} · ${relTime(p.updatedAt)}${since && p.updatedAt > since ? ' · <b style="color:var(--brand)">geändert</b>' : ''}</span></span></label>`).join('')}</div>
+    <p class="tiny" id="sync-sum" style="margin:10px 2px"></p>
+    <div class="row"><button class="btn grow" data-close>Abbrechen</button><button class="btn primary grow" data-go>Datei erstellen</button></div>`);
+  const boxes = () => $$('input[type=checkbox]', sh.el);
+  const sum = () => { const sel = boxes().filter(b => b.checked).map(b => all.find(p => p.id === b.value));
+    $('#sync-sum', sh.el).textContent = `${sel.length} Anleitung${sel.length !== 1 ? 'en' : ''} · ${sel.reduce((a, p) => a + photosOf(p), 0)} Fotos`;
+    $('[data-go]', sh.el).disabled = !sel.length; };
+  sum();
+  sh.el.addEventListener('change', sum);
+  sh.el.addEventListener('click', async e => {
+    const s = e.target.closest('[data-sel]');
+    if (s) { boxes().forEach(b => { const p = all.find(x => x.id === b.value); b.checked = s.dataset.sel === 'all' || (s.dataset.sel === 'changed' && p.updatedAt > since); }); sum(); }
+    if (e.target.closest('[data-go]')) {
+      const sel = boxes().filter(b => b.checked).map(b => all.find(p => p.id === b.value));
+      sh.close();
+      const b = busy('Datei wird erstellt…');
+      try {
+        const file = await Sync.build(sel, { getPhoto: id => DB.getPhoto(id), appVersion: VERSION,
+          onProgress: (i, n) => { const t = $('.busy span:last-child'); if (t) t.textContent = `Datei wird erstellt… ${Math.round(i / n * 100)} %`; } });
+        markSynced(); b(); deliverSheet(file, syncHint());
+      } catch (err) { b(); console.error(err); toast('Fehler: ' + err.message); }
+    }
+  });
+}
+
+async function syncIn(bundle) {
+  const items = await Sync.plan(bundle);
+  const label = { new: ['neu', 'brand'], newer: ['neuere Fassung', 'brand'], same: ['schon aktuell', ''], older: ['hier neuer', 'warn'] };
+  const sh = sheet(`<h2>Übertragung einlesen</h2>
+    <p class="small muted" style="margin:-6px 0 12px">Datei vom ${bundle.exported ? new Date(bundle.exported).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : '–'} · ${items.length} Anleitung${items.length !== 1 ? 'en' : ''}</p>
+    <div class="opts">${items.map((it, i) => { const p = it.project, [l, c] = label[it.status];
+      return `<label class="opt"><input type="checkbox" data-i="${i}" ${it.status === 'new' || it.status === 'newer' ? 'checked' : ''} ${it.status === 'same' ? 'disabled' : ''} style="width:22px;height:22px;min-height:0;flex:none">
+        <span class="grow" style="min-width:0"><b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pTitle(p))}</b>
+        <span class="small muted">${p.steps.length} Schritte · Stand ${relTime(p.updatedAt)}${it.status === 'older' ? ` – hier bearbeitet ${relTime(it.local.updatedAt)}, würde überschrieben` : ''}</span></span>
+        <span class="chip ${c}">${l}</span></label>`; }).join('')}</div>
+    <div class="row" style="margin-top:14px"><button class="btn grow" data-close>Abbrechen</button><button class="btn primary grow" data-go>Übernehmen</button></div>`);
+  const upd = () => { const n = $$('input[data-i]:checked', sh.el).length; const g = $('[data-go]', sh.el); g.disabled = !n; g.textContent = n ? `${n} übernehmen` : 'Nichts zu übernehmen'; };
+  upd(); sh.el.addEventListener('change', upd);
+  $('[data-go]', sh.el).onclick = async () => {
+    const sel = $$('input[data-i]:checked', sh.el).map(b => items[+b.dataset.i]);
+    sh.close();
+    const b = busy('Wird übernommen…');
+    try {
+      const n = await Sync.apply(bundle, sel, { makeThumb: async blob => (await thumbFrom(blob)).blob,
+        onProgress: (i, k) => { const t = $('.busy span:last-child'); if (t) t.textContent = `Wird übernommen… ${i}/${k}`; } });
+      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+      const neu = sel.filter(x => x.status === 'new').length;
+      toast(`✓ ${n} übernommen (${neu} neu, ${n - neu} aktualisiert)`);
+      S.projects = []; if (S.route.view === 'home') renderHome(); else go('#/');
+    } catch (err) { console.error(err); toast('Übernahme fehlgeschlagen: ' + err.message); }
+    finally { b(); }
+  };
 }
 function exportSheet() {
   const p = S.P;
@@ -625,7 +785,7 @@ function exportSheet() {
       <button class="opt" data-k="csv" ${bomN ? '' : 'disabled'}><span class="ic">📋</span><span><b>Stückliste (Excel/CSV)</b><span class="small muted">${bomN} Positionen, gleiche Artikel zusammengefasst</span></span></button>
       <button class="opt" data-k="print" ${bomN ? '' : 'disabled'}><span class="ic">🖨</span><span><b>Stückliste drucken / PDF</b><span class="small muted">Druckansicht im Browser</span></span></button>
       <button class="opt" data-k="json"><span class="ic">💾</span><span><b>JSON für PC-Konverter</b><span class="small muted">Format wie bisher</span></span></button>
-      <button class="opt" data-k="backup"><span class="ic">⤓</span><span><b>Sicherung</b><span class="small muted">Komplett inkl. Fotos – auf anderem Gerät importierbar</span></span></button>
+      <button class="opt" data-k="backup"><span class="ic">⤴</span><span><b>Übertragen / Sicherung</b><span class="small muted">Inkl. Fotos – am PC oder Handy mit „Übertragung einlesen“ öffnen</span></span></button>
     </div>
     <button class="btn block" data-close style="margin-top:12px">Abbrechen</button>`);
   sh.el.addEventListener('click', e => {
@@ -673,25 +833,13 @@ async function renderHomeData() { if (!S.projects.length) S.projects = (await DB
 
 async function importFile(file) {
   if (/\.pptx$/i.test(file.name)) return importPptx(file);
-  const stop = busy('Wird importiert…');
+  const stop = busy('Datei wird gelesen…');
   try {
+    const bundle = await Sync.read(file);
+    if (bundle) { stop(); return syncIn(bundle); }
     const data = JSON.parse(await file.text());
     let p;
-    const now = Date.now();
-    if (data.format === 'funkwerk-recorder-backup' && data.project) {
-      p = JSON.parse(JSON.stringify(data.project)); p.id = uid(); p.updatedAt = now; delete p.hidden;
-      for (const s of p.steps) {
-        s.id = uid();
-        const ids = [];
-        for (const oid of s.photoIds) {
-          const ph = data.photos[oid]; if (!ph) continue;
-          const blob = await dataURLtoBlob(ph.data); const t = await thumbFrom(blob);
-          const rec = { id: uid(), projectId: p.id, blob, thumb: t.blob, w: ph.w, h: ph.h, createdAt: ph.createdAt, orig: ph.orig ? await dataURLtoBlob(ph.orig) : null, marks: ph.marks || null };
-          await DB.putPhoto(rec); ids.push(rec.id);
-        }
-        s.photoIds = ids;
-      }
-    } else if (Array.isArray(data.workSteps)) {
+    if (Array.isArray(data.workSteps)) {
       p = await fromLegacy(data.projectInfo || {}, data.workSteps.filter(s => !s.stepType || s.stepType === 'WORK_STEP'), async ph => ph.data);
     } else throw new Error('Unbekanntes Dateiformat');
     await DB.putProject(p);
@@ -767,11 +915,14 @@ document.addEventListener('click', async e => {
     case 'open': if (e.target.closest('[data-act="pmenu"]')) return; return go(`#/p/${id}`);
     case 'pmenu': e.stopPropagation(); return projectMenu(id);
     case 'import': return $('#pick-backup').click();
+    case 'sync-out': return syncOut();
     case 'import-pptx': return $('#pick-pptx').click();
     case 'fullscreen': return toggleFullscreen();
     case 'legacy-import': return importLegacy();
     case 'legacy-hide': localStorage.setItem('fw4.legacyDone', '1'); S.legacy = null; return renderHome();
     case 'home': return go('#/');
+    case 'nav-home': return go('#/');
+    case 'nav-cad': return go('#/cad');
     case 'back-project': case 'done': return go(`#/p/${S.P.id}`);
     case 'step': return go(`#/p/${S.P.id}/s/${id}/material`);
     case 'up': return moveStep(id, -1);
@@ -782,6 +933,8 @@ document.addEventListener('click', async e => {
     case 'tab': return go(`#/p/${S.P.id}/s/${s.id}/${x}`);
     case 'next': return addStep(s.id);
     case 'smenu': return stepMenu();
+    case 'sdel': { const st = S.P && S.P.steps.find(x => x.id === id); return st && deleteStep(st); }
+    case 'sdel-cur': { const st = curStep(); return st && deleteStep(st); }
     case 'scan': {
       const code = await Media.scan(); if (!code) return;
       $('#m-no').value = code; const h = matHistory()[code.toUpperCase()]; if (h && !$('#m-de').value) $('#m-de').value = h.description;
