@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.2.3';
+const VERSION = '5.3.0';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -52,12 +52,38 @@ function busy(text) {
 }
 function sheet(html, { onClose } = {}) {
   const back = document.createElement('div'); back.className = 'sheet-back';
-  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div>`;
-  const close = () => { back.remove(); onClose && onClose(); };
+  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" tabindex="-1"><div class="grab"></div>${html}</div>`;
+  const prevFocus = document.activeElement;
+  let closed = false;
+  const close = () => {
+    if (closed) return; closed = true; back.remove(); onClose && onClose();
+    if (prevFocus && prevFocus.isConnected && !isTouch) try { prevFocus.focus({ preventScroll: true }); } catch (e) {}
+  };
+  back._close = close;
   back.addEventListener('click', e => { if (e.target === back || e.target.closest('[data-close]')) close(); });
   document.body.appendChild(back);
-  return { el: back.querySelector('.sheet'), close };
+  const el = back.querySelector('.sheet');
+  const h = el.querySelector('h2'); if (h) el.setAttribute('aria-label', h.textContent.trim());
+  // Tastatur: Fokus in den Dialog, Tab bleibt im Dialog
+  if (!isTouch) requestAnimationFrame(() => { if (!el.contains(document.activeElement)) el.focus({ preventScroll: true }); });
+  el.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const f = $$('button:not([disabled]), input:not([disabled]):not([type=hidden]), select, textarea, a[href], label.opt', el).filter(x => x.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === el)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+  return { el, close };
 }
+/* Esc schließt den obersten Dialog bzw. Kamera/Markieren */
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const ann = $('.ann'); if (ann) { const b = $('[data-a="cancel"]', ann); if (b) { e.preventDefault(); b.click(); } return; }
+  const cam = $('.sheet-back.cam'); if (cam) { const b = $('[data-x]', cam); if (b) { e.preventDefault(); b.click(); } return; }
+  const backs = $$('.sheet-back'); const top = backs[backs.length - 1];
+  if (top) { e.preventDefault(); if (top._close) top._close(); else top.remove(); }
+});
 function menu(items) {
   return new Promise(res => {
     const sh = sheet(`<div class="menu">${items.map((it, i) => `<button data-i="${i}" class="${it.danger ? 'danger' : ''}"><span class="ic">${it.icon}</span>${esc(it.label)}</button>`).join('')}</div>
@@ -241,7 +267,7 @@ async function renderHome() {
         <div class="thumb" style="${thumbs[i] ? `background-image:url('${thumbs[i]}')` : ''}">${thumbs[i] ? '' : '📋'}</div>
         <div class="grow" style="min-width:0"><div class="t">${esc(pTitle(p))}</div>
           <div class="m">${esc(pSub(p)) || '&nbsp;'}</div>
-          <div class="chips"><span class="chip brand">${esc(Layout.areaLabel(p))}</span><span class="chip">${p.steps.length} Schritt${p.steps.length !== 1 ? 'e' : ''}</span><span class="chip">📷 ${photos}</span><span class="chip">${relTime(p.updatedAt)}</span></div></div>
+          <div class="chips"><span class="chip brand">${esc(Layout.areaLabel(p))}</span><span class="meta">${p.steps.length} Schritt${p.steps.length !== 1 ? 'e' : ''}, ${photos} Foto${photos !== 1 ? 's' : ''} · ${relTime(p.updatedAt)}</span></div></div>
         <button class="icon-btn" data-act="pmenu" data-id="${p.id}" aria-label="Mehr">⋯</button></div>`;
     }).join('')}</div>` : `<div class="empty">Noch keine Anleitungen.<br>Tippe oben auf „Neue Montageanleitung“.</div>`}
     <div class="sect">Handy ↔ PC übertragen</div>
@@ -252,7 +278,7 @@ async function renderHome() {
       </div>
       <div class="small muted">Am Handy <b>„Anleitungen übertragen“</b> → in OneDrive sichern (oder per Mail/AirDrop senden). Am PC <b>„Übertragung einlesen“</b> → dieselbe Datei wählen. Vorhandene Anleitungen werden aktualisiert, nicht verdoppelt.${lastSync() ? ` · Zuletzt übertragen: ${relTime(lastSync())}` : ''}</div>
       <div class="tiny" id="storage">Speicher wird ermittelt…</div>
-      <div class="tiny">Version ${VERSION} · Daten bleiben auf diesem Gerät · <a href="../" style="color:inherit">alte Version öffnen</a> · Created by P. Busch</div>
+      <div class="tiny">Version ${VERSION} · Daten bleiben auf diesem Gerät · <a href="../" class="footlink">alte Version öffnen</a> · Created by P. Busch</div>
     </div>
   </main>`;
   storageInfo();
@@ -261,7 +287,8 @@ async function storageInfo() {
   try {
     const e = await navigator.storage.estimate();
     const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false;
-    const el = $('#storage'); if (el) el.textContent = `Belegt: ${(e.usage / 1048576).toFixed(1)} MB von ${(e.quota / 1048576 / 1024).toFixed(1)} GB${persisted ? ' · dauerhaft gespeichert' : ''}`;
+    const fmt = b => b >= 1073741824 ? (b / 1073741824).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + ' GB' : (b / 1048576).toLocaleString('de-DE', { maximumFractionDigits: b < 10485760 ? 1 : 0 }) + ' MB';
+    const el = $('#storage'); if (el) el.textContent = `Belegt: ${fmt(e.usage)} von ${fmt(e.quota)}${persisted ? ' · dauerhaft gespeichert' : ''}`;
   } catch (e) { const el = $('#storage'); if (el) el.textContent = ''; }
 }
 
@@ -409,10 +436,10 @@ function projectGrid(p, labels) {
         <div class="cap"><b class="n">${i + 1}</b><span class="t">${esc(Layout.stepTitle(s, i + 1))}</span>
           ${s.isScanStep ? '<span class="chip scan">Scan</span>' : ''}${lay.warnings.length ? `<span class="chip warn" title="${esc(lay.warnings.join(' '))}">⚠ prüfen</span>` : ''}
           <span class="grow"></span>
-          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne">◀</button>
-          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten">▶</button>
-          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten">✎</button>
-          <button class="icon-btn sm sdel" data-act="sdel" data-id="${s.id}" title="Schritt löschen">🗑</button></div>
+          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne" aria-label="Schritt ${i + 1} nach vorne">◀</button>
+          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten" aria-label="Schritt ${i + 1} nach hinten">▶</button>
+          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten" aria-label="Schritt ${i + 1} bearbeiten">✎</button>
+          <button class="icon-btn sm sdel" data-act="sdel" data-id="${s.id}" title="Schritt löschen" aria-label="Schritt ${i + 1} löschen">🗑</button></div>
       </div>`;
     }).join('')}
     <button class="pslide add" data-act="add-step"><span>+</span>Schritt hinzufügen</button>
@@ -495,8 +522,8 @@ function renderStep() {
   const wide = matchMedia('(min-width:1040px)').matches;
   const tabIdx = TABS.findIndex(t => t[0] === tab);
   let secondary = ['Fertig', 'done'], primary;
-  if (tab === 'material') primary = ['Weiter: Anweisung →', 'tab:anweisung'];
-  else if (tab === 'anweisung') primary = ['Weiter: Fotos →', 'tab:fotos'];
+  if (tab === 'material') primary = ['Weiter: Anweisung', 'tab:anweisung'];
+  else if (tab === 'anweisung') primary = ['Weiter: Fotos', 'tab:fotos'];
   else if (tab === 'fotos' && !wide) { secondary = ['Vorschau', 'tab:vorschau']; primary = ['+ Nächster Schritt', 'next']; }
   else primary = ['+ Nächster Schritt', 'next'];
 
@@ -546,8 +573,8 @@ function tabBody(tab, s, n) {
     <div class="sect">Material in diesem Schritt (${s.materials.length})</div>
     <div class="stack">${s.materials.length ? s.materials.map((m, i) => `
       <div class="mat"><div class="grow" style="min-width:0"><div class="no">${esc(m.number)}</div>
-        <input data-f="materials.${i}.description" value="${esc(m.description)}" placeholder="Bezeichnung" style="border:0;padding:2px 0;min-height:30px;font-size:14px;color:var(--ink2)"></div>
-        <div class="qty sm"><button data-act="mi:${i}:-1">−</button><input data-f="materials.${i}.quantity" type="number" inputmode="numeric" min="1" value="${m.quantity}"><button data-act="mi:${i}:1">+</button></div>
+        <input class="mdesc" data-f="materials.${i}.description" value="${esc(m.description)}" placeholder="Bezeichnung ergänzen" aria-label="Bezeichnung zu ${esc(m.number)}"></div>
+        <div class="qty sm"><button data-act="mi:${i}:-1" aria-label="Menge ${esc(m.number)} verringern">−</button><input data-f="materials.${i}.quantity" type="number" inputmode="numeric" min="1" value="${m.quantity}" aria-label="Menge ${esc(m.number)}"><button data-act="mi:${i}:1" aria-label="Menge ${esc(m.number)} erhöhen">+</button></div>
         <button class="x" data-act="mat-del:${i}" aria-label="Entfernen">×</button></div>`).join('') : '<div class="empty" style="padding:18px">Kein Material – Schritt geht auch ohne.</div>'}
       ${s.materials.length > 5 ? '<div class="warnbox">Viele Positionen: die Tabelle schiebt die Anweisung auf der Folie nach unten.</div>' : ''}
     </div>`;

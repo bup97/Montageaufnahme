@@ -568,6 +568,7 @@ const STYLE = `
 .cad-step .mv{display:flex;flex-direction:column}
 .cad-step .mv button{width:32px;height:28px;border:0;background:transparent;color:var(--ink2);border-radius:6px}
 .cad-step .mv button:disabled{opacity:.25}
+@media(pointer:coarse){.cad-step{grid-template-columns:24px 64px minmax(0,1fr) auto}.cad-step .mv button{width:44px;height:40px}}
 .cad-viewer{position:relative;height:calc(100vh - 210px);min-height:380px;border-radius:var(--r);overflow:hidden;background:${VIEWER_BG};box-shadow:var(--shadow)}
 .cad-viewer canvas{display:block;width:100%;height:100%;touch-action:none}
 .cad-vtop{position:absolute;left:10px;right:10px;top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;pointer-events:none}
