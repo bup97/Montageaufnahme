@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.3.3';
+const VERSION = '5.3.4';
 window.APP_VERSION = VERSION;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -1000,6 +1000,29 @@ $('#pick-pptx').addEventListener('change', e => { const f = e.target.files[0]; e
 document.addEventListener('dragover', e => { if (S.route.view === 'step') e.preventDefault(); });
 document.addEventListener('drop', e => { if (S.route.view !== 'step') return; e.preventDefault(); const st = curStep(); addFiles(e.dataTransfer.files, st); if (S.route.tab !== 'fotos') go(`#/p/${S.P.id}/s/${st.id}/fotos`); });
 document.addEventListener('paste', e => { if (S.route.view !== 'step') return; const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/')); if (files.length) { e.preventDefault(); addFiles(files, curStep()); } });
+
+/* ================= Neue Version online? ================= */
+let updateShown = false;
+async function checkUpdate() {
+  if (updateShown || location.protocol !== 'https:' && location.hostname !== '127.0.0.1') return;
+  try {
+    const r = await fetch('version.txt?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) return;
+    const v = (await r.text()).trim();
+    if (v && v !== VERSION) {
+      updateShown = true;
+      const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); t.style.zIndex = 85;
+      t.innerHTML = `<span>Neue Version ${esc(v)} verfügbar</span><button>Jetzt neu laden</button>`;
+      t.querySelector('button').onclick = async () => {
+        try { await flush(); const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map(x => x.update().catch(() => {}))); } catch (e) {}
+        location.reload();
+      };
+      document.body.appendChild(t);
+    }
+  } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
+setInterval(checkUpdate, 5 * 60 * 1000);
+setTimeout(checkUpdate, 3000);
 
 /* ================= Vollbild (PC) ================= */
 const fsOK = () => !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
