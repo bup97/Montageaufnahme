@@ -142,14 +142,20 @@
     const need = Math.max(opt.minHits, Math.ceil(opt.hitFrac * Math.min(A.samples.length, B.samples.length)));
     let hits = 0; const o = [0, 0, 0];
     const BIG = opt.maxDist || 1e7;
+    // Achsrichtung: Strahlen, die an der Box des anderen Teils vorbeigehen, gar nicht erst verfolgen
+    const ax = d[0] !== 0 ? 0 : d[1] !== 0 ? 1 : 2, u = (ax + 1) % 3, v = (ax + 2) % 3, sgn = d[ax], m = tol + eps;
+    const misses = (s, T, sg) => s[u] < T.min[u] - m || s[u] > T.max[u] + m || s[v] < T.min[v] - m || s[v] > T.max[v] + m ||
+      (sg > 0 ? s[ax] > T.max[ax] + m : s[ax] < T.min[ax] - m);
     // Strahlen von A in Richtung d gegen B
     for (const s of A.samples) {
+      if (misses(s, B, sgn)) continue;
       o[0] = s[0] - s[3] * eps; o[1] = s[1] - s[4] * eps; o[2] = s[2] - s[5] * eps;
       if (rayTest(B.bvh, o, d, tol, BIG) === 1) { if (++hits >= need) return true; }
     }
     // Strahlen von B in Richtung -d gegen A
     const nd = [-d[0], -d[1], -d[2]];
     for (const s of B.samples) {
+      if (misses(s, A, -sgn)) continue;
       o[0] = s[0] - s[3] * eps; o[1] = s[1] - s[4] * eps; o[2] = s[2] - s[5] * eps;
       if (rayTest(A.bvh, o, nd, tol, BIG) === 1) { if (++hits >= need) return true; }
     }
@@ -230,9 +236,16 @@
       }
       return cache.get(k);
     };
+    // Für jedes Teil und jede Richtung einmal alle möglichen Hindernisse bestimmen (hängt nicht davon ab,
+    // was schon entfernt ist) – danach nur noch die kurze Liste auf die verbliebenen Teile filtern.
+    const coreIds = core.map(u => u.id);
+    const blAll = new Map();
     const blockers = (a, di, ignore) => {
+      const k = a + '|' + di;
+      let all = blAll.get(k);
+      if (!all) { all = []; for (const b of coreIds) if (b !== a && blk(a, b, di)) all.push(b); blAll.set(k, all); }
       const res = [];
-      for (const b of remaining) if (b !== a && !(ignore && ignore.has(b)) && blk(a, b, di)) res.push(b);
+      for (const b of all) if (remaining.has(b) && !(ignore && ignore.has(b))) res.push(b);
       return res;
     };
     const tcache = new Map();
@@ -422,39 +435,64 @@
       post({ type: 'progress', phase: 'read', value: 0 });
       const mesh = msg.mesh || { lin: 0.001, ang: 0.2 };
       occtLog.length = 0;
-      let res = occt.ReadStepFile(new Uint8Array(msg.buffer), {
-        linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio',
-        linearDeflection: mesh.lin, angularDeflection: mesh.ang
-      });
-      const info = { heapMB: Math.round(occt.HEAPU8.buffer.byteLength / 1048576), meshes: res && res.meshes ? res.meshes.length : 0, verts: 0, tris: 0 };
-      if (res && res.meshes) res.meshes.forEach(m => { info.verts += (m.attributes.position.array.length / 3) | 0; info.tris += m.index ? (m.index.array.length / 3) | 0 : 0; });
-      if (!info.tris) { post({ type: 'progress', phase: 'read', value: 0 }); try { info.scan = scanStep(msg.buffer); } catch (e) { info.scan = { error: e.message }; } }
-      msg.buffer = null;                                   // Rohdatei freigeben
-      if (!res || !res.success) throw new Error('Die STEP-Datei konnte nicht gelesen werden.');
-      parts = []; preps = null;
-      const walk = (n, path) => {
-        const here = n.name ? path.concat(n.name) : path;
-        if (n.meshes && n.meshes.length) {
-          let nv = 0, ni = 0;
-          for (const mi of n.meshes) { const m = res.meshes[mi]; nv += m.attributes.position.array.length; ni += m.index.array.length; }
-          const pos = new Float32Array(nv), nrm = new Float32Array(nv), idx = new Uint32Array(ni);
-          let vo = 0, io = 0; let color = null;
-          for (const mi of n.meshes) {
-            const m = res.meshes[mi]; const p = m.attributes.position.array;
-            const nn = m.attributes.normal ? m.attributes.normal.array : null;
-            pos.set(p, vo); if (nn) nrm.set(nn, vo);
-            const base = vo / 3; const ix = m.index.array;
-            for (let k = 0; k < ix.length; k++) idx[io + k] = ix[k] + base;
-            vo += p.length; io += ix.length;
-            if (!color && m.color) color = m.color;
-          }
-          parts.push({ id: parts.length, name: n.name || ('Teil ' + (parts.length + 1)), path: here.slice(0, -1), color, pos, nrm, idx });
-        }
-        (n.children || []).forEach(c => walk(c, here));
+      const SPLIT_FROM = 30 * 1048576;                     // große Dateien: in Einzelteile zerlegen (Speichergrenze des Lesers)
+      const splitRead = () => {
+        if (typeof root.StepSplit === 'undefined' && typeof importScripts === 'function') importScripts((msg.base || '') + 'stepsplit.js');
+        const r = root.StepSplit.read(occt, new Uint8Array(msg.buffer), mesh, post, logLine);
+        parts = r.parts.map((p, i) => Object.assign(p, { id: i }));
+        return r;
       };
-      walk(res.root, []);
-      const rootName = res.root && (res.root.name || (res.root.children && res.root.children.length === 1 ? res.root.children[0].name : '')) || '';
-      res = null;                                           // Rohergebnis freigeben, bevor Kopien entstehen
+      let info = null, rootName = '';
+      parts = []; preps = null;
+      if (msg.split === true || (msg.buffer.byteLength >= SPLIT_FROM && msg.split !== false)) {
+        try {
+          const r = splitRead(); rootName = r.rootName;
+          info = { mode: 'split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed };
+        } catch (e) { logLine('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = []; }
+      }
+      if (!info) {
+        let res = occt.ReadStepFile(new Uint8Array(msg.buffer), {
+          linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio',
+          linearDeflection: mesh.lin, angularDeflection: mesh.ang
+        });
+        info = { mode: 'whole', heapMB: Math.round(occt.HEAPU8.buffer.byteLength / 1048576), meshes: res && res.meshes ? res.meshes.length : 0 };
+        let tris = 0; if (res && res.meshes) res.meshes.forEach(m => { tris += m.index ? (m.index.array.length / 3) | 0 : 0; });
+        if (!tris && msg.split !== false) {                 // nichts erzeugt (Speicher voll?) – zweiter Versuch: zerlegt
+          res = null; logLine('Keine Oberflächen – zweiter Versuch mit zerlegter Datei');
+          try { const r = splitRead(); rootName = r.rootName; info = Object.assign(info, { mode: 'whole→split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed }); }
+          catch (e) { logLine('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = []; }
+        } else {
+          if (!res || !res.success) throw new Error('Die STEP-Datei konnte nicht gelesen werden.');
+          const walk = (n, path) => {
+            const here = n.name ? path.concat(n.name) : path;
+            if (n.meshes && n.meshes.length) {
+              let nv = 0, ni = 0;
+              for (const mi of n.meshes) { const m = res.meshes[mi]; nv += m.attributes.position.array.length; ni += m.index.array.length; }
+              const pos = new Float32Array(nv), nrm = new Float32Array(nv), idx = new Uint32Array(ni);
+              let vo = 0, io = 0; let color = null;
+              for (const mi of n.meshes) {
+                const m = res.meshes[mi]; const p = m.attributes.position.array;
+                const nn = m.attributes.normal ? m.attributes.normal.array : null;
+                pos.set(p, vo); if (nn) nrm.set(nn, vo);
+                const base = vo / 3; const ix = m.index.array;
+                for (let k = 0; k < ix.length; k++) idx[io + k] = ix[k] + base;
+                vo += p.length; io += ix.length;
+                if (!color && m.color) color = m.color;
+              }
+              parts.push({ id: parts.length, name: n.name || ('Teil ' + (parts.length + 1)), path: here.slice(0, -1), color, pos, nrm, idx });
+            }
+            (n.children || []).forEach(c => walk(c, here));
+          };
+          walk(res.root, []);
+          rootName = res.root && (res.root.name || (res.root.children && res.root.children.length === 1 ? res.root.children[0].name : '')) || '';
+          res = null;                                       // Rohergebnis freigeben, bevor Kopien entstehen
+        }
+      }
+      info.heapMB = Math.round(occt.HEAPU8.buffer.byteLength / 1048576);
+      info.verts = 0; info.tris = 0;
+      parts.forEach(p => { info.verts += p.pos.length / 3; info.tris += p.idx.length / 3; });
+      if (!info.tris) { try { info.scan = scanStep(msg.buffer); } catch (e) { info.scan = { error: e.message }; } }
+      msg.buffer = null;                                   // Rohdatei freigeben
       // Kopien senden, Originale fuer die Analyse behalten
       const out = parts.map(p => ({ id: p.id, name: p.name, path: p.path, color: p.color, pos: p.pos.slice(), nrm: p.nrm.slice(), idx: p.idx.slice() }));
       const transfer = [];

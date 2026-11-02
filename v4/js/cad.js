@@ -211,7 +211,7 @@ window.addEventListener('unhandledrejection', e => { if (ROOT?.isConnected) diag
 const DETAILS = [['auto', 'Automatisch'], ['fine', 'Fein'], ['normal', 'Normal'], ['coarse', 'Grob']];
 const DETAIL_MESH = {   // Feinheit der Dreiecksnetze (relativ zur Baugruppengröße) und Winkel
   fine: { lin: 0.001, ang: 0.2 }, normal: { lin: 0.0025, ang: 0.35 }, coarse: { lin: 0.006, ang: 0.6 } };
-const autoDetail = bytes => bytes > 80 * 1048576 ? 'coarse' : bytes > 25 * 1048576 ? 'normal' : 'fine';
+const autoDetail = (bytes) => bytes > 25 * 1048576 ? 'normal' : 'fine';   // große Dateien werden zerlegt gelesen – Speicher reicht
 
 // ======================= Worker =======================
 let worker = null, workerOk = null, msgId = 0;
@@ -278,13 +278,14 @@ async function analyze() {
     setPhase('wasm', 0);
     const buf = await S.stepFile.arrayBuffer();
     const detail = S.detail === 'auto' || !S.detail ? autoDetail(S.stepFile.size) : S.detail;
-    const res = await call({ type: 'parse', buffer: buf, mesh: DETAIL_MESH[detail] }, setPhase, [buf]);
+    const res = await call({ type: 'parse', buffer: buf, mesh: DETAIL_MESH[detail], split: window.CAD_SPLIT }, setPhase, [buf]);
     const tri = res.parts.reduce((a, p) => a + p.idx.length / 3, 0);
     console.info(`[CAD] ${res.parts.length} Teile, ${(tri / 1e6).toFixed(2)} Mio. Dreiecke, Detailgrad ${detail}`);
     S.loadInfo = { parts: res.parts.length, tri, detail, empty: res.parts.filter(p => !p.idx.length).length };
     diag(`Eingelesen: ${res.parts.length} Teile, ${tri.toLocaleString('de-DE')} Dreiecke (Detailgrad ${DETAILS.find(d => d[0] === detail)[1]})`);
     const I = res.info || {};
-    diag(`STEP-Leser: Speicher ${I.heapMB ?? '?'} MB von 2048 MB · Netze ${I.meshes ?? '?'} · Punkte ${(I.verts ?? 0).toLocaleString('de-DE')} · Dreiecke ${(I.tris ?? 0).toLocaleString('de-DE')}`);
+    if (/split/.test(I.mode || '')) diag(`Zerlegt gelesen${I.mode === 'whole→split' ? ' (zweiter Versuch)' : ''}: ${I.products} Bauteile, ${I.withGeo} mit Geometrie, ${I.occurrences} Einbauten${I.failed ? `, ${I.failed} ohne Oberfläche` : ''}`);
+    diag(`STEP-Leser: Speicher ${I.heapMB ?? '?'} MB von 2048 MB · Netze ${I.meshes ?? '–'} · Punkte ${(I.verts ?? 0).toLocaleString('de-DE')} · Dreiecke ${(I.tris ?? 0).toLocaleString('de-DE')}`);
     if (I.scan) {
       const sc = I.scan;
       diag(`Dateiinhalt: Schema ${sc.schema || '?'} · System ${sc.system || '?'} · Einheit ${sc.unit || '?'}`);
