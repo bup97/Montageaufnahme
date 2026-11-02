@@ -394,10 +394,12 @@
       post({ type: 'progress', phase: 'wasm', value: 0 });
       const occt = await getOcct(msg.base || '');
       post({ type: 'progress', phase: 'read', value: 0 });
-      const res = occt.ReadStepFile(new Uint8Array(msg.buffer), {
+      const mesh = msg.mesh || { lin: 0.001, ang: 0.2 };
+      let res = occt.ReadStepFile(new Uint8Array(msg.buffer), {
         linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio',
-        linearDeflection: 0.001, angularDeflection: 0.2
+        linearDeflection: mesh.lin, angularDeflection: mesh.ang
       });
+      msg.buffer = null;                                   // Rohdatei freigeben
       if (!res || !res.success) throw new Error('Die STEP-Datei konnte nicht gelesen werden.');
       parts = []; preps = null;
       const walk = (n, path) => {
@@ -422,6 +424,7 @@
       };
       walk(res.root, []);
       const rootName = res.root && (res.root.name || (res.root.children && res.root.children.length === 1 ? res.root.children[0].name : '')) || '';
+      res = null;                                           // Rohergebnis freigeben, bevor Kopien entstehen
       // Kopien senden, Originale fuer die Analyse behalten
       const out = parts.map(p => ({ id: p.id, name: p.name, path: p.path, color: p.color, pos: p.pos.slice(), nrm: p.nrm.slice(), idx: p.idx.slice() }));
       const transfer = [];

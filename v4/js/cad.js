@@ -18,6 +18,7 @@ let ROOT = null;
 
 // ======================= Zustand (bleibt beim Wechsel der Reiter erhalten) =======================
 const S = {
+  detail: 'auto',
   stepFile: null, bomFile: null, analyzed: false,
   parts: [], bom: null, match: {}, contacts: new Map(), boxVol: [],
   steps: [], sel: 0, warnings: [],
@@ -174,6 +175,12 @@ function distinctLabel(part) { const i = S.match[part.name]; const b = bomOf(par
 function labelOf(part) { const b = bomOf(part); return b && !distinctLabel(part) ? b.name : part.clean; }
 function groupOf(part) { const i = S.match[part.name]; return (i !== undefined && i >= 0) ? 'pos:' + i + (distinctLabel(part) ? ':' + norm(part.clean) : '') : 'name:' + norm(part.clean); }
 
+// ======================= Detailgrad =======================
+const DETAILS = [['auto', 'Automatisch'], ['fine', 'Fein'], ['normal', 'Normal'], ['coarse', 'Grob']];
+const DETAIL_MESH = {   // Feinheit der Dreiecksnetze (relativ zur Baugruppengröße) und Winkel
+  fine: { lin: 0.001, ang: 0.2 }, normal: { lin: 0.0025, ang: 0.35 }, coarse: { lin: 0.006, ang: 0.6 } };
+const autoDetail = bytes => bytes > 80 * 1048576 ? 'coarse' : bytes > 25 * 1048576 ? 'normal' : 'fine';
+
 // ======================= Worker =======================
 let worker = null, workerOk = null, msgId = 0;
 const pending = new Map();
@@ -233,9 +240,14 @@ async function analyze() {
       const rows = /\.xlsx$/i.test(S.bomFile.name) ? await readXlsx(buf) : readCsv(new TextDecoder(isUtf8(buf) ? 'utf-8' : 'windows-1252').decode(buf));
       S.bom = interpretBom(rows);
     }
+    if (gpuLost) resetThree();                         // nach Speicherengpass: 3D-Ansicht neu aufbauen
     setPhase('wasm', 0);
     const buf = await S.stepFile.arrayBuffer();
-    const res = await call({ type: 'parse', buffer: buf }, setPhase, [buf]);
+    const detail = S.detail === 'auto' || !S.detail ? autoDetail(S.stepFile.size) : S.detail;
+    const res = await call({ type: 'parse', buffer: buf, mesh: DETAIL_MESH[detail] }, setPhase, [buf]);
+    const tri = res.parts.reduce((a, p) => a + p.idx.length / 3, 0);
+    console.info(`[CAD] ${res.parts.length} Teile, ${(tri / 1e6).toFixed(2)} Mio. Dreiecke, Detailgrad ${detail}`);
+    S.loadInfo = { parts: res.parts.length, tri, detail };
     clearInterval(readTimer);
     buildParts(res);
     autoMatch();
@@ -244,7 +256,11 @@ async function analyze() {
     render();
   } catch (e) {
     console.error(e); clearInterval(readTimer);
-    err.textContent = String(e.message || e); err.hidden = false;
+    const msg = String(e.message || e);
+    err.textContent = /memory|speicher|allocation|out of bounds|abort|oom/i.test(msg)
+      ? 'Für dieses Modell reicht der Arbeitsspeicher des Browsers nicht. Bitte Detailgrad „Grob“ wählen und erneut starten – oder die Baugruppe in SolidWorks vereinfacht exportieren (z. B. ohne Gewinde/Normteile-Details).'
+      : msg;
+    err.hidden = false;
     $('#cad-go', ROOT).disabled = false;
   }
 }
@@ -366,7 +382,7 @@ function regenTexts() {
 }
 
 // ======================= 3D =======================
-let renderer, scene, camera, controls, offRenderer, offCamera, arrowGroup, mats, arrowMat;
+let renderer, scene, camera, controls, offCamera, arrowGroup, mats, arrowMat, gpuLost = false, loopStarted = false;
 const meshes = [], ghostMeshes = [];
 const modelBox = new THREE.Box3();
 let needRender = true, downAt = null, resizeObs = null;
@@ -398,13 +414,15 @@ function initThree() {
   arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ARROW), roughness: 0.45, emissive: 0x06223f });
   renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
   renderer.domElement.addEventListener('pointerup', onPick);
-  offRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-  offRenderer.setPixelRatio(1);
+  // Grafikspeicher knapp? Statt leerer Bilder einen verständlichen Hinweis zeigen
+  renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); gpuLost = true; showGpuHint(); });
+  renderer.domElement.addEventListener('webglcontextrestored', () => { gpuLost = false; needRender = true; thumbs.clear(); scheduleThumbs(); });
   offCamera = new THREE.PerspectiveCamera(30, 1, 1, 100000); scene.add(offCamera);
   offCamera.add(d1.clone()); offCamera.add(d2.clone());
+  if (loopStarted) return; loopStarted = true;
   const loop = () => {
     requestAnimationFrame(loop);
-    if (!renderer.domElement.isConnected) return;
+    if (!renderer || gpuLost || !renderer.domElement.isConnected) return;
     if (controls.update() || needRender) { needRender = false; renderer.render(scene, camera); }
   };
   loop();
@@ -507,14 +525,32 @@ function setCam(cam, v, ctrl) {
 }
 const camFor = (si, cam, aspect) => S.steps[si].cam || autoCam(si, cam, aspect);
 function showStep(si) { applyStep(si); setCam(camera, camFor(si, camera, camera.aspect), controls); }
+/* Bild eines Schritts – mit derselben Zeichenfläche wie die 3D-Ansicht, damit das Modell
+   nur einmal im Grafikspeicher liegt (vorher: zweite Zeichenfläche → bei großen Modellen leere Bilder). */
 function renderTo(si, w, h, bg) {
-  offRenderer.setSize(w, h, false);
-  offRenderer.setClearColor(new THREE.Color(bg || VIEWER_BG));
+  initThree();
+  const out = document.createElement('canvas'); out.width = w; out.height = h;
+  const ctx = out.getContext('2d');
+  if (gpuLost) { ctx.fillStyle = bg || VIEWER_BG; ctx.fillRect(0, 0, w, h); return out; }
+  const prevPR = renderer.getPixelRatio(), prev = renderer.getSize(new THREE.Vector2());
+  renderer.setPixelRatio(1); renderer.setSize(w, h, false);
+  renderer.setClearColor(new THREE.Color(bg || VIEWER_BG));
   offCamera.aspect = w / h; offCamera.updateProjectionMatrix();
   applyStep(si);
   setCam(offCamera, camFor(si, offCamera, w / h));
-  offRenderer.render(scene, offCamera);
-  return offRenderer.domElement;
+  renderer.render(scene, offCamera);
+  ctx.drawImage(renderer.domElement, 0, 0, w, h);          // sofort abgreifen, solange der Puffer gefüllt ist
+  renderer.setPixelRatio(prevPR); renderer.setSize(Math.max(1, prev.x), Math.max(1, prev.y), false);
+  renderer.setClearColor(new THREE.Color(VIEWER_BG)); needRender = true;
+  return out;
+}
+function resetThree() {
+  try { disposeScene(); renderer?.dispose(); controls?.dispose(); } catch (e) {}
+  renderer?.domElement.remove(); renderer = null; scene = null; gpuLost = false; thumbs.clear();
+}
+function showGpuHint() {
+  const box = ROOT && $('#cad-gpu', ROOT); if (box) { box.hidden = false; return; }
+  API?.toast?.('Der Grafikspeicher reicht für dieses Modell nicht. Bitte mit Detailgrad „Grob“ neu laden.');
 }
 function onPick(e) {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;
@@ -606,11 +642,18 @@ function ensureStyle() { if (!document.getElementById('cad-style')) { const s = 
 
 let thumbs = new Map(), thumbTimer = null;
 function scheduleThumbs() { clearTimeout(thumbTimer); thumbTimer = setTimeout(makeThumbs, 250); }
-function makeThumbs() {
+let thumbRun = 0;
+async function makeThumbs() {
   if (!S.analyzed || !ROOT?.isConnected) return;
-  S.steps.forEach((st, i) => thumbs.set(st.uid, renderTo(i, 192, 180).toDataURL('image/jpeg', 0.8)));
-  applyStep(S.sel);
-  $$('.cad-step', ROOT).forEach(li => { const img = li.querySelector('img'); const u = thumbs.get(li.dataset.uid); if (img && u) img.src = u; });
+  const run = ++thumbRun;
+  for (let i = 0; i < S.steps.length; i++) {
+    if (run !== thumbRun || !ROOT?.isConnected) return;          // neuer Durchlauf gestartet
+    const st = S.steps[i]; if (!st || thumbs.has(st.uid)) continue;
+    thumbs.set(st.uid, renderTo(i, 192, 180).toDataURL('image/jpeg', 0.8));
+    const li = $(`.cad-step[data-uid="${st.uid}"] img`, ROOT); if (li) li.src = thumbs.get(st.uid);
+    if (i % 4 === 3) { applyStep(S.sel); await new Promise(r => setTimeout(r, 0)); }   // Oberfläche bleibt bedienbar
+  }
+  applyStep(S.sel); needRender = true;
 }
 
 export function mount(root, api) {
@@ -634,6 +677,11 @@ function renderStart() {
       <label class="cad-drop ${S.bomFile ? 'filled' : ''}" id="cad-d-bom"><input type="file" id="cad-f-bom" accept=".xlsx,.csv,.txt">
         <span class="ic">📋</span><b>Stückliste</b><span class="small muted">Empfohlen · .xlsx oder .csv mit Pos., Art.-Nr., Benennung, Menge (optional Drehmoment)</span>
         <span class="file" id="cad-n-bom">${S.bomFile ? esc(S.bomFile.name) : ''}</span></label>
+    </div>
+    <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <div style="flex:1 1 220px"><label class="f" for="cad-detail">Detailgrad</label>
+        <select id="cad-detail">${DETAILS.map(([k, l]) => `<option value="${k}" ${S.detail === k ? 'selected' : ''}>${l}${k === 'auto' && S.stepFile ? ' – ' + DETAILS.find(d => d[0] === autoDetail(S.stepFile.size))[1] : ''}</option>`).join('')}</select></div>
+      <p class="tiny" style="flex:2 1 260px;margin:0 0 4px">Große Dateien werden gröber eingelesen – für Montagebilder reicht das und spart viel Speicher. Bei Problemen „Grob“ wählen.</p>
     </div>
     <button class="btn primary block" id="cad-go" ${S.stepFile ? '' : 'disabled'} style="min-height:56px">Analyse starten</button>
     <div class="card" id="cad-prog" hidden>
@@ -662,6 +710,7 @@ function renderStart() {
   bind('cad-d-step', 'cad-f-step', f => { S.stepFile = f; renderStart(); });
   bind('cad-d-bom', 'cad-f-bom', f => { S.bomFile = f; renderStart(); });
   $('#cad-go', ROOT).addEventListener('click', analyze);
+  $('#cad-detail', ROOT)?.addEventListener('change', e => { S.detail = e.target.value; });
 }
 
 function kindChip(st) {
@@ -691,6 +740,7 @@ function renderWork() {
         <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
       </div>`).join('')}</div>
+    <div class="banner" id="cad-gpu" ${gpuLost ? '' : 'hidden'} style="grid-column:1/-1">Der Grafikspeicher reicht für dieses Modell nicht – Bilder und 3D-Ansicht bleiben leer. Bitte „Andere Dateien“ wählen, Detailgrad <b>„Grob“</b> einstellen und die Analyse erneut starten.</div>
     <div class="cad-viewer" id="cad-viewer">
       <div class="cad-vtop">
         <div class="cad-vtitle"><div class="k" id="cad-vk"></div><div class="h" id="cad-vh"></div></div>
