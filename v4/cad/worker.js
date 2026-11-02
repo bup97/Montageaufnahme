@@ -378,15 +378,41 @@
   'use strict';
   const C = root.AsmCore;
   let occtPromise = null, parts = null, preps = null;
+  const occtLog = [];                                       // Meldungen des STEP-Lesers (sonst unsichtbar)
+  const logLine = (t) => { t = String(t).trim(); if (!t) return; if (occtLog.length && occtLog[occtLog.length - 1].t === t) { occtLog[occtLog.length - 1].n++; return; } occtLog.push({ t, n: 1 }); if (occtLog.length > 80) occtLog.splice(20, 1); };
 
   function getOcct(base) {
     if (!occtPromise) {
       if (typeof root.occtimportjs !== 'function') {
         if (typeof importScripts === 'function') importScripts(base + 'occt-import-js.js');
       }
-      occtPromise = root.occtimportjs({ locateFile: (n) => base + n });
+      occtPromise = root.occtimportjs({ locateFile: (n) => base + n, print: logLine, printErr: logLine });
     }
     return occtPromise;
+  }
+
+  /* Was steckt in der STEP-Datei? (Schema, Einheit, Geometriearten) – stückweise, ohne die ganze Datei als Text zu halten */
+  const TYPES = ['MANIFOLD_SOLID_BREP', 'BREP_WITH_VOIDS', 'FACETED_BREP', 'SHELL_BASED_SURFACE_MODEL', 'GEOMETRIC_CURVE_SET', 'GEOMETRIC_SET',
+    'ADVANCED_FACE', 'B_SPLINE_SURFACE_WITH_KNOTS', 'TRIANGULATED_FACE', 'COMPLEX_TRIANGULATED_FACE', 'TESSELLATED_SOLID', 'TESSELLATED_SHELL',
+    'TESSELLATED_SHAPE_REPRESENTATION', 'MAPPED_ITEM', 'PRODUCT', 'NEXT_ASSEMBLY_USAGE_OCCURRENCE', 'DOCUMENT_FILE', 'EXTERNALLY_DEFINED_ITEM'];
+  function scanStep(buf) {
+    const u8 = new Uint8Array(buf), dec = new TextDecoder('latin1'), cnt = {};
+    TYPES.forEach(t => { cnt[t] = 0; });
+    const rx = /[=,(\s]([A-Z][A-Z0-9_]{3,})\s*\(/g, CH = 4 << 20;
+    let head = '';
+    for (let o = 0; o < u8.length; o += CH) {
+      const s = dec.decode(u8.subarray(Math.max(0, o - 64), Math.min(u8.length, o + CH)));
+      if (!o) head = s.slice(0, 4000);
+      let m; rx.lastIndex = o ? 64 : 0;
+      while ((m = rx.exec(s))) if (m[1] in cnt) cnt[m[1]]++;
+    }
+    const pick = (re) => (head.match(re) || [])[1] || '';
+    const unit = (dec.decode(u8.subarray(0, Math.min(u8.length, 8 << 20))).match(/SI_UNIT\s*\(\s*(\.[A-Z]+\.|\$)\s*,\s*\.METRE\./) || [])[1] || '';
+    return {
+      schema: pick(/FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'/), system: pick(/FILE_NAME\s*\([^;]*?'[^']*'\s*,\s*'[^']*'\s*,\s*\([^)]*\)\s*,\s*\([^)]*\)\s*,\s*'([^']*)'/),
+      unit: unit === '.MILLI.' ? 'mm' : unit === '$' ? 'm' : unit.replace(/\./g, '').toLowerCase() + 'm',
+      types: Object.fromEntries(Object.entries(cnt).filter(([, v]) => v))
+    };
   }
 
   async function handle(msg, post) {
@@ -395,10 +421,14 @@
       const occt = await getOcct(msg.base || '');
       post({ type: 'progress', phase: 'read', value: 0 });
       const mesh = msg.mesh || { lin: 0.001, ang: 0.2 };
+      occtLog.length = 0;
       let res = occt.ReadStepFile(new Uint8Array(msg.buffer), {
         linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio',
         linearDeflection: mesh.lin, angularDeflection: mesh.ang
       });
+      const info = { heapMB: Math.round(occt.HEAPU8.buffer.byteLength / 1048576), meshes: res && res.meshes ? res.meshes.length : 0, verts: 0, tris: 0 };
+      if (res && res.meshes) res.meshes.forEach(m => { info.verts += (m.attributes.position.array.length / 3) | 0; info.tris += m.index ? (m.index.array.length / 3) | 0 : 0; });
+      if (!info.tris) { post({ type: 'progress', phase: 'read', value: 0 }); try { info.scan = scanStep(msg.buffer); } catch (e) { info.scan = { error: e.message }; } }
       msg.buffer = null;                                   // Rohdatei freigeben
       if (!res || !res.success) throw new Error('Die STEP-Datei konnte nicht gelesen werden.');
       parts = []; preps = null;
@@ -429,7 +459,8 @@
       const out = parts.map(p => ({ id: p.id, name: p.name, path: p.path, color: p.color, pos: p.pos.slice(), nrm: p.nrm.slice(), idx: p.idx.slice() }));
       const transfer = [];
       out.forEach(p => transfer.push(p.pos.buffer, p.nrm.buffer, p.idx.buffer));
-      return { result: { parts: out, rootName }, transfer };
+      info.log = occtLog.map(l => l.n > 1 ? `${l.t}  (${l.n}×)` : l.t);
+      return { result: { parts: out, rootName, info }, transfer };
     }
     if (msg.type === 'sequence') {
       if (!parts) throw new Error('Keine Geometrie geladen.');

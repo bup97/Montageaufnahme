@@ -192,7 +192,7 @@ function diagText() {
   const ctr = sz ? modelBox.getCenter(new THREE.Vector3()) : null;
   const mem = performance.memory ? ` · JS-Speicher ${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} von ${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB` : '';
   return [
-    `Montage-Recorder ${window.APP_VERSION || ''} · ${navigator.userAgent.match(/Edg\/[\d.]+|Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+ Safari/)?.[0] || navigator.userAgent}`,
+    `Montage-Recorder ${window.APP_VERSION || ''} · ${(navigator.userAgent.match(/Edg\/[\d.]+/) || navigator.userAgent.match(/Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+ Safari/))?.[0] || navigator.userAgent}`,
     `Datei: ${f ? f.name + ' · ' + (f.size / 1048576).toFixed(1) + ' MB' : '–'} · Detailgrad: ${(DETAILS.find(d => d[0] === (L.detail || S.detail)) || [, '–'])[1]}`,
     `Teile: ${L.parts ?? '–'} · Dreiecke: ${L.tri != null ? L.tri.toLocaleString('de-DE') : '–'} · Teile ohne Dreiecke: ${L.empty ?? '–'}`,
     `Modellgröße: ${sz ? [sz.x, sz.y, sz.z].map(v => Math.round(v).toLocaleString('de-DE')).join(' × ') + ' mm · Mitte ' + [ctr.x, ctr.y, ctr.z].map(v => Math.round(v).toLocaleString('de-DE')).join(' / ') : '–'}`,
@@ -283,6 +283,25 @@ async function analyze() {
     console.info(`[CAD] ${res.parts.length} Teile, ${(tri / 1e6).toFixed(2)} Mio. Dreiecke, Detailgrad ${detail}`);
     S.loadInfo = { parts: res.parts.length, tri, detail, empty: res.parts.filter(p => !p.idx.length).length };
     diag(`Eingelesen: ${res.parts.length} Teile, ${tri.toLocaleString('de-DE')} Dreiecke (Detailgrad ${DETAILS.find(d => d[0] === detail)[1]})`);
+    const I = res.info || {};
+    diag(`STEP-Leser: Speicher ${I.heapMB ?? '?'} MB von 2048 MB · Netze ${I.meshes ?? '?'} · Punkte ${(I.verts ?? 0).toLocaleString('de-DE')} · Dreiecke ${(I.tris ?? 0).toLocaleString('de-DE')}`);
+    if (I.scan) {
+      const sc = I.scan;
+      diag(`Dateiinhalt: Schema ${sc.schema || '?'} · System ${sc.system || '?'} · Einheit ${sc.unit || '?'}`);
+      diag('Geometriearten: ' + (sc.error ? 'Fehler ' + sc.error : Object.entries(sc.types || {}).map(([k, v]) => `${k} ${v.toLocaleString('de-DE')}`).join(', ') || 'keine erkannt'));
+    }
+    (I.log || []).slice(-25).forEach(l => diag('Leser: ' + l));
+    if (!tri) {
+      const sc = I.scan || {}, ty = sc.types || {};
+      const tess = (ty.TRIANGULATED_FACE || 0) + (ty.COMPLEX_TRIANGULATED_FACE || 0) + (ty.TESSELLATED_SOLID || 0) + (ty.TESSELLATED_SHELL || 0);
+      const solids = (ty.MANIFOLD_SOLID_BREP || 0) + (ty.BREP_WITH_VOIDS || 0) + (ty.FACETED_BREP || 0) + (ty.SHELL_BASED_SURFACE_MODEL || 0);
+      let why = 'Die Datei wurde gelesen (' + res.parts.length + ' Teile), aber es ließ sich keine darstellbare Geometrie erzeugen.';
+      if (!solids && tess) why += ' Die Datei enthält nur vorvernetzte AP242-Daten. Bitte in SolidWorks als STEP AP214 exportieren.';
+      else if (!solids && !tess) why += ' In der Datei sind keine Volumenkörper enthalten (nur Baugruppenstruktur). Bitte beim Export „Volumenkörper/Flächen“ statt nur Struktur wählen.';
+      else if (I.heapMB >= 1900) why += ' Der Speicher des STEP-Lesers war voll. Bitte die Baugruppe vereinfacht oder in Unterbaugruppen exportieren.';
+      else why += ' Bitte die Diagnose unten kopieren und an den Ersteller schicken.';
+      throw new Error(why);
+    }
     clearInterval(readTimer);
     buildParts(res);
     autoMatch();
@@ -295,10 +314,12 @@ async function analyze() {
     console.error(e); clearInterval(readTimer);
     const msg = String(e.message || e);
     DIAG.failed = true; diag('Abbruch: ' + msg);
-    err.textContent = /memory|speicher|allocation|out of bounds|abort|oom/i.test(msg)
+    err.textContent = /memory|allocation|out of bounds|abort|oom/i.test(msg) && !/darstellbare Geometrie/.test(msg)
       ? 'Für dieses Modell reicht der Arbeitsspeicher des Browsers nicht. Bitte Detailgrad „Grob“ wählen und erneut starten – oder die Baugruppe in SolidWorks vereinfacht exportieren (z. B. ohne Gewinde/Normteile-Details).'
       : msg;
     err.hidden = false;
+    const d = $('#cad-diag', ROOT);
+    if (d) { d.open = true; updateDiag(); } else err.insertAdjacentHTML('afterend', diagBlock(true));
     $('#cad-go', ROOT).disabled = false;
   }
 }
