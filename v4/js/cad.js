@@ -175,6 +175,38 @@ function distinctLabel(part) { const i = S.match[part.name]; const b = bomOf(par
 function labelOf(part) { const b = bomOf(part); return b && !distinctLabel(part) ? b.name : part.clean; }
 function groupOf(part) { const i = S.match[part.name]; return (i !== undefined && i >= 0) ? 'pos:' + i + (distinctLabel(part) ? ':' + norm(part.clean) : '') : 'name:' + norm(part.clean); }
 
+// ======================= Diagnose =======================
+const DIAG = { ev: [], t0: 0 };
+function diag(msg) { const t = DIAG.t0 ? ((performance.now() - DIAG.t0) / 1000).toFixed(1) + ' s' : new Date().toLocaleTimeString('de-DE'); DIAG.ev.push(`[${t}] ${msg}`); if (DIAG.ev.length > 60) DIAG.ev.shift(); updateDiag(); }
+function gpuInfo() {
+  try {
+    const gl = renderer?.getContext(); if (!gl) return 'noch nicht gestartet';
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    return `${name} · WebGL${renderer.capabilities.isWebGL2 ? '2' : '1'} · max. Textur ${gl.getParameter(gl.MAX_TEXTURE_SIZE)} px${gl.isContextLost() ? ' · KONTEXT VERLOREN' : ''}`;
+  } catch (e) { return 'unbekannt (' + e.message + ')'; }
+}
+function diagText() {
+  const f = S.stepFile, L = S.loadInfo || {};
+  const sz = modelBox && !modelBox.isEmpty() ? modelBox.getSize(new THREE.Vector3()) : null;
+  const ctr = sz ? modelBox.getCenter(new THREE.Vector3()) : null;
+  const mem = performance.memory ? ` · JS-Speicher ${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} von ${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB` : '';
+  return [
+    `Montage-Recorder ${window.APP_VERSION || ''} · ${navigator.userAgent.match(/Edg\/[\d.]+|Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+ Safari/)?.[0] || navigator.userAgent}`,
+    `Datei: ${f ? f.name + ' · ' + (f.size / 1048576).toFixed(1) + ' MB' : '–'} · Detailgrad: ${(DETAILS.find(d => d[0] === (L.detail || S.detail)) || [, '–'])[1]}`,
+    `Teile: ${L.parts ?? '–'} · Dreiecke: ${L.tri != null ? L.tri.toLocaleString('de-DE') : '–'} · Teile ohne Dreiecke: ${L.empty ?? '–'}`,
+    `Modellgröße: ${sz ? [sz.x, sz.y, sz.z].map(v => Math.round(v).toLocaleString('de-DE')).join(' × ') + ' mm · Mitte ' + [ctr.x, ctr.y, ctr.z].map(v => Math.round(v).toLocaleString('de-DE')).join(' / ') : '–'}`,
+    `Schrittbilder: ${DIAG.thumbs || '–'}`,
+    `Grafik: ${gpuInfo()}${mem}`,
+    '— Ablauf —', ...DIAG.ev
+  ].join('\n');
+}
+function updateDiag() { const el = ROOT && $('#cad-diag-txt', ROOT); if (el) el.textContent = diagText(); }
+const diagBlock = (open) => `<details class="cad-diag" id="cad-diag" ${open ? 'open' : ''}><summary>Diagnose (bei Problemen bitte an den Ersteller schicken)</summary>
+  <pre id="cad-diag-txt">${esc(diagText())}</pre><button class="btn sm" data-cad="diagcopy">Diagnose kopieren</button></details>`;
+window.addEventListener('error', e => { if (ROOT?.isConnected) diag('Fehler: ' + (e.message || e.error)); });
+window.addEventListener('unhandledrejection', e => { if (ROOT?.isConnected) diag('Fehler: ' + (e.reason?.message || e.reason)); });
+
 // ======================= Detailgrad =======================
 const DETAILS = [['auto', 'Automatisch'], ['fine', 'Fein'], ['normal', 'Normal'], ['coarse', 'Grob']];
 const DETAIL_MESH = {   // Feinheit der Dreiecksnetze (relativ zur Baugruppengröße) und Winkel
@@ -241,22 +273,28 @@ async function analyze() {
       S.bom = interpretBom(rows);
     }
     if (gpuLost) resetThree();                         // nach Speicherengpass: 3D-Ansicht neu aufbauen
+    DIAG.ev = []; DIAG.t0 = performance.now(); DIAG.failed = false; DIAG.blank = false; DIAG.thumbs = '';
+    diag(`Analyse gestartet: ${S.stepFile.name} (${(S.stepFile.size / 1048576).toFixed(1)} MB)`);
     setPhase('wasm', 0);
     const buf = await S.stepFile.arrayBuffer();
     const detail = S.detail === 'auto' || !S.detail ? autoDetail(S.stepFile.size) : S.detail;
     const res = await call({ type: 'parse', buffer: buf, mesh: DETAIL_MESH[detail] }, setPhase, [buf]);
     const tri = res.parts.reduce((a, p) => a + p.idx.length / 3, 0);
     console.info(`[CAD] ${res.parts.length} Teile, ${(tri / 1e6).toFixed(2)} Mio. Dreiecke, Detailgrad ${detail}`);
-    S.loadInfo = { parts: res.parts.length, tri, detail };
+    S.loadInfo = { parts: res.parts.length, tri, detail, empty: res.parts.filter(p => !p.idx.length).length };
+    diag(`Eingelesen: ${res.parts.length} Teile, ${tri.toLocaleString('de-DE')} Dreiecke (Detailgrad ${DETAILS.find(d => d[0] === detail)[1]})`);
     clearInterval(readTimer);
     buildParts(res);
     autoMatch();
+    diag('Reihenfolge wird berechnet …');
     await runSequence();
+    diag(`Reihenfolge fertig: ${S.steps.length} Schritte`);
     S.analyzed = true; thumbs.clear();
     render();
   } catch (e) {
     console.error(e); clearInterval(readTimer);
     const msg = String(e.message || e);
+    DIAG.failed = true; diag('Abbruch: ' + msg);
     err.textContent = /memory|speicher|allocation|out of bounds|abort|oom/i.test(msg)
       ? 'Für dieses Modell reicht der Arbeitsspeicher des Browsers nicht. Bitte Detailgrad „Grob“ wählen und erneut starten – oder die Baugruppe in SolidWorks vereinfacht exportieren (z. B. ohne Gewinde/Normteile-Details).'
       : msg;
@@ -415,7 +453,8 @@ function initThree() {
   renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
   renderer.domElement.addEventListener('pointerup', onPick);
   // Grafikspeicher knapp? Statt leerer Bilder einen verständlichen Hinweis zeigen
-  renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); gpuLost = true; showGpuHint(); });
+  renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); gpuLost = true; diag('Grafikspeicher: Zeichenfläche verloren (webglcontextlost)'); showGpuHint(); });
+  diag('3D gestartet: ' + gpuInfo());
   renderer.domElement.addEventListener('webglcontextrestored', () => { gpuLost = false; needRender = true; thumbs.clear(); scheduleThumbs(); });
   offCamera = new THREE.PerspectiveCamera(30, 1, 1, 100000); scene.add(offCamera);
   offCamera.add(d1.clone()); offCamera.add(d2.clone());
@@ -590,6 +629,7 @@ const STYLE = `
 .cad-prog-row .d{width:14px;height:14px;border-radius:50%;border:2px solid #d3d3d8}
 .cad-prog-row.active{color:var(--ink);font-weight:600}.cad-prog-row.active .d{border-color:var(--brand);border-top-color:transparent;animation:rot .8s linear infinite}
 .cad-prog-row.done{color:var(--ink2)}.cad-prog-row.done .d{border-color:var(--ok);background:var(--ok)}
+.cad-diag{margin-top:14px;font-size:13px}.cad-diag summary{cursor:pointer;color:var(--ink2);padding:8px 0;min-height:44px}.cad-diag pre{white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;max-height:260px;overflow:auto;margin:6px 0 8px}
 .cad-bar{height:5px;border-radius:3px;background:#ececf0;overflow:hidden;margin-top:8px}.cad-bar i{display:block;height:100%;width:0;background:var(--brand);transition:width .2s}
 .cad-how{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
 .cad-how b{display:block;color:var(--brand)}
@@ -645,15 +685,30 @@ function scheduleThumbs() { clearTimeout(thumbTimer); thumbTimer = setTimeout(ma
 let thumbRun = 0;
 async function makeThumbs() {
   if (!S.analyzed || !ROOT?.isConnected) return;
-  const run = ++thumbRun;
+  const run = ++thumbRun; let okN = 0, blankN = 0;
   for (let i = 0; i < S.steps.length; i++) {
     if (run !== thumbRun || !ROOT?.isConnected) return;          // neuer Durchlauf gestartet
     const st = S.steps[i]; if (!st || thumbs.has(st.uid)) continue;
-    thumbs.set(st.uid, renderTo(i, 192, 180).toDataURL('image/jpeg', 0.8));
+    let cv;
+    try { cv = renderTo(i, 192, 180); } catch (e) { diag(`Bild Schritt ${i + 1}: Fehler ${e.message}`); continue; }
+    if (isBlank(cv)) blankN++; else okN++;
+    thumbs.set(st.uid, cv.toDataURL('image/jpeg', 0.8));
     const li = $(`.cad-step[data-uid="${st.uid}"] img`, ROOT); if (li) li.src = thumbs.get(st.uid);
     if (i % 4 === 3) { applyStep(S.sel); await new Promise(r => setTimeout(r, 0)); }   // Oberfläche bleibt bedienbar
   }
   applyStep(S.sel); needRender = true;
+  DIAG.thumbs = `${okN} mit Inhalt, ${blankN} leer`;
+  diag(`Schrittbilder erzeugt: ${okN} mit Inhalt, ${blankN} leer`);
+  if (blankN && !okN) { DIAG.blank = true; const d = $('#cad-diag', ROOT); if (d) d.open = true; }
+}
+/* Leeres Bild = nur Hintergrundfarbe */
+function isBlank(cv) {
+  try {
+    const x = cv.getContext('2d'), d = x.getImageData(0, 0, cv.width, cv.height).data;
+    const r0 = d[0], g0 = d[1], b0 = d[2];
+    for (let i = 0; i < d.length; i += 4 * 7) if (Math.abs(d[i] - r0) + Math.abs(d[i + 1] - g0) + Math.abs(d[i + 2] - b0) > 12) return false;
+    return true;
+  } catch (e) { return false; }
 }
 
 export function mount(root, api) {
@@ -692,6 +747,7 @@ function renderStart() {
       <div class="cad-bar"><i id="cad-bar"></i></div>
     </div>
     <div class="banner" id="cad-err" hidden></div>
+    ${DIAG.ev.length ? diagBlock(DIAG.failed) : ''}
     <div class="sect">So funktioniert's</div>
     <div class="card cad-how">
       <div><b>1 · Zuordnen</b><span class="small muted">STEP-Teile werden über Art.-Nr. und Benennung den Stücklistenpositionen zugeordnet.</span></div>
@@ -760,6 +816,7 @@ function renderWork() {
       <div id="cad-ins"></div>
     </div>
   </div>
+  ${diagBlock(DIAG.blank)}
   <div class="bottom"><div class="bottom-in"><button class="btn" data-cad="restart">Andere Dateien</button><button class="btn primary" data-cad="takeover">Als Anleitung übernehmen</button></div></div>`;
   attachViewer($('#cad-viewer', ROOT));
   renderIns(); updateHead(); showStep(S.sel);
@@ -1276,6 +1333,7 @@ document.addEventListener('click', e => {
       return runSequence().then(() => { thumbs.clear(); insTab = 'step'; renderWork(); toast('Reihenfolge neu berechnet'); }).catch(err => toast(err.message));
     }
     case 'restart': S.analyzed = false; return render();
+    case 'diagcopy': { const t = diagText(); (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => API.toast('Diagnose kopiert – bitte in den Chat einfügen'), () => { const pre = $('#cad-diag-txt', ROOT); const r = document.createRange(); r.selectNodeContents(pre); getSelection().removeAllRanges(); getSelection().addRange(r); API.toast('Text markiert – mit Strg+C kopieren'); }); return; }
     case 'takeover': return takeOver();
     case 'el-manual': { const E = elecInit(); E.res = { pages: 0, textPages: 0 }; E.conns.push({ id: rid(), a: { kind: 'term', bmk: 'X1', pin: '1' }, b: { kind: 'dev', bmk: 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); E.terminals = [...new Set([...E.terminals, 'X1'])]; E.devices = E.devices.some(d => d.bmk === 'M1') ? E.devices : [...E.devices, { bmk: 'M1', desc: 'Gerät' }]; return renderIns(); }
     case 'el-reset': { const E = elecInit(); E.res = null; E.file = null; E.conns = []; E.err = ''; pickMode = null; return renderIns(); }
