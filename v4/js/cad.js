@@ -658,7 +658,7 @@ const STYLE = `
 .cad-how{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
 .cad-how b{display:block;color:var(--brand)}
 .cad-work{display:grid;grid-template-columns:290px minmax(0,1fr) 360px;gap:14px;align-items:start}
-.cad-list{display:flex;flex-direction:column;gap:6px;max-height:calc(100vh - 210px);overflow:auto;padding:2px}
+.cad-list{display:flex;flex-direction:column;gap:6px;max-height:var(--cad-h, calc(100vh - 210px));overflow:auto;padding:2px}
 .cad-step{display:grid;grid-template-columns:24px 64px minmax(0,1fr) auto;gap:8px;align-items:center;background:#fff;border-radius:var(--r-s);box-shadow:var(--shadow);padding:6px;cursor:pointer;border:2px solid transparent;position:relative}
 .cad-step.sel{border-color:var(--brand)}
 .cad-step.drag-over::before{content:"";position:absolute;left:6px;right:6px;top:-5px;height:3px;border-radius:2px;background:var(--brand)}
@@ -669,7 +669,7 @@ const STYLE = `
 .cad-step .mv button{width:32px;height:28px;border:0;background:transparent;color:var(--ink2);border-radius:6px}
 .cad-step .mv button:disabled{opacity:.25}
 @media(pointer:coarse){.cad-step{grid-template-columns:24px 64px minmax(0,1fr) auto}.cad-step .mv button{width:44px;height:40px}}
-.cad-viewer{position:relative;height:calc(100vh - 210px);min-height:380px;border-radius:var(--r);overflow:hidden;background:${VIEWER_BG};box-shadow:var(--shadow)}
+.cad-viewer{position:relative;height:var(--cad-h, calc(100vh - 210px));min-height:380px;border-radius:var(--r);overflow:hidden;background:${VIEWER_BG};box-shadow:var(--shadow)}
 .cad-viewer canvas{display:block;width:100%;height:100%;touch-action:none}
 .cad-vtop{position:absolute;left:10px;right:10px;top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;pointer-events:none}
 .cad-vtop>*{pointer-events:auto}
@@ -699,6 +699,12 @@ const STYLE = `
 .el-tab tr.off td{opacity:.5}
 .chip.scan{background:#fff6bf;color:#6b5a00}
 @media(min-width:1700px){.cad-work{grid-template-columns:340px minmax(0,1fr) 440px;gap:18px}}
+/* PC: Schrittliste, 3D-Ansicht und rechte Spalte bleiben stehen – Liste und rechte Spalte scrollen jeweils für sich */
+@media(min-width:1181px){.cad-work>.cad-list,.cad-work>.cad-viewer,.cad-work>.cad-ins{position:sticky;top:calc(128px + var(--safe-t, 0px))}
+  .cad-work-warn{max-height:72px;overflow:auto}
+  .cad-work>.cad-ins{max-height:var(--cad-h, calc(100vh - 210px));overflow-y:auto;overscroll-behavior:contain;padding:2px 6px 12px 2px;scrollbar-gutter:stable}
+  .cad-work>.cad-ins>.seg{position:sticky;top:0;z-index:3;box-shadow:0 6px 10px -6px rgba(0,0,0,.12)}
+  .cad-work>.cad-list{overscroll-behavior:contain}}
 @media(max-width:1180px){.cad-work{grid-template-columns:260px minmax(0,1fr)}.cad-work .cad-ins{grid-column:1/-1}}
 @media(max-width:760px){.cad-work{display:flex;flex-direction:column}.cad-viewer{height:52vh;width:100%}.cad-list{max-height:none}.cad-legend{display:none}.cad-work>*{width:100%}}
 `;
@@ -810,12 +816,13 @@ function scrollState() {
   const out = []; let n = ROOT;
   while (n) { if (n.scrollTop) out.push([n, n.scrollTop]); n = n.parentElement; }
   const se = document.scrollingElement; if (se && se.scrollTop && !out.some(x => x[0] === se)) out.push([se, se.scrollTop]);
-  const list = $('#cad-list', ROOT); return { out, list: list ? list.scrollTop : 0 };
+  const list = $('#cad-list', ROOT), ins = $('.cad-ins', ROOT); return { out, list: list ? list.scrollTop : 0, ins: ins ? ins.scrollTop : 0 };
 }
 function restoreScroll(k) {
   if (!k) return;
   k.out.forEach(([n, t]) => { n.scrollTop = t; });
   const list = $('#cad-list', ROOT); if (list) list.scrollTop = k.list;
+  const ins = $('.cad-ins', ROOT); if (ins) ins.scrollTop = k.ins;
 }
 // ausgewählten Schritt in der Liste sichtbar machen – nur die Liste scrollen, nicht die Seite
 function revealSel() {
@@ -828,6 +835,16 @@ function refreshSel() {
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
   revealSel(); renderIns(); updateHead(); showStep(S.sel);
 }
+// PC: Arbeitsbereich genau in den sichtbaren Bereich einpassen – die Seite selbst muss nicht scrollen,
+// Schrittliste und rechte Spalte scrollen für sich, die 3D-Ansicht bleibt immer ganz zu sehen.
+function fitWork() {
+  const w = ROOT && $('.cad-work', ROOT); if (!w) return;
+  if (innerWidth < 1181) { w.style.removeProperty('--cad-h'); return; }
+  const top = w.getBoundingClientRect().top + (document.scrollingElement?.scrollTop || 0);
+  const bar = document.querySelector('.bottom')?.offsetHeight || 70;
+  w.style.setProperty('--cad-h', Math.max(380, Math.floor(innerHeight - top - bar - 14)) + 'px');
+}
+if (typeof window !== 'undefined') window.addEventListener('resize', () => { clearTimeout(fitWork.t); fitWork.t = setTimeout(fitWork, 80); });
 function renderWork() {
   const keepScroll = ROOT && $('#cad-list', ROOT) ? scrollState() : null;
   const st = mapStatus();
@@ -836,7 +853,7 @@ function renderWork() {
   if (S.bom && st.qtyDiff) warn.push(st.qtyDiff + ' Position(en) mit abweichender Menge zwischen Modell und Stückliste.');
   ROOT.innerHTML = `
   <div style="margin-bottom:12px"><div style="font-weight:700;font-size:17px">${esc(S.meta.title)}</div><div class="tiny">${esc(S.meta.art)}${S.meta.art ? ' · ' : ''}${S.parts.length} Teile · ${S.steps.length} Schritte</div></div>
-  ${warn.length ? `<div class="warnbox" style="margin-bottom:12px">⚠ ${warn.map(esc).join('<br>⚠ ')}</div>` : ''}
+  ${warn.length ? `<div class="warnbox cad-work-warn" style="margin-bottom:12px">⚠ ${warn.map(esc).join('<br>⚠ ')}</div>` : ''}
   <div class="cad-work">
     <div class="cad-list" id="cad-list">${S.steps.map((s, i) => `
       <div class="cad-step ${i === S.sel ? 'sel' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
@@ -868,7 +885,7 @@ function renderWork() {
   <div class="bottom"><div class="bottom-in"><button class="btn" data-cad="restart">Andere Dateien</button><button class="btn primary" data-cad="takeover">Als Anleitung übernehmen</button></div></div>`;
   attachViewer($('#cad-viewer', ROOT));
   renderIns(); updateHead(); showStep(S.sel);
-  restoreScroll(keepScroll); revealSel();
+  fitWork(); restoreScroll(keepScroll); revealSel();
   if (S.steps.some(s => !thumbs.has(s.uid))) requestAnimationFrame(makeThumbs);   // fehlende Bilder (neu oder geändert) erzeugen
   bindList();
 }
@@ -1436,7 +1453,7 @@ document.addEventListener('click', e => {
     case 'down': return moveStep(+el.dataset.i, +el.dataset.i + 1);
     case 'prev': return select(S.sel - 1);
     case 'next': return select(S.sel + 1);
-    case 'ins': insTab = x; renderInsTabs(); return renderIns();
+    case 'ins': { insTab = x; renderInsTabs(); const ins = $('.cad-ins', ROOT); if (ins) ins.scrollTop = 0; return renderIns(); }
     case 'explode': S.meta.explode = !S.meta.explode; S.steps.forEach(s => { delete s.view; }); thumbs.clear(); el.setAttribute('aria-pressed', S.meta.explode); renderWork(); return;
     case 'view': { const st = S.steps[S.sel]; st.view = x; thumbs.delete(st.uid); showStep(S.sel); renderWork(); return; }
     case 'ghost': S.meta.ghost = !S.meta.ghost; el.setAttribute('aria-pressed', S.meta.ghost); applyStep(S.sel); return scheduleThumbs();
