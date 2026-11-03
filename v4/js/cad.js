@@ -933,7 +933,7 @@ function renderWireIns(el, st) {
   <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>von</th><th>nach</th><th>Ader</th><th></th></tr></thead><tbody>
     ${ws.map(c => `<tr><td>${esc(short(c.a))}</td><td>${esc(short(c.b))}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
-  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Linie = Kabelweg (Aderfarbe, sonst gelb). Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
+  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb), der Verlauf wird nicht gezeichnet. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
   on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
@@ -1026,6 +1026,32 @@ function afterChange() {
 const WIRE_COLORS = { vio: 0x7048e8, vi: 0x7048e8, br: 0x8b5a2b, bn: 0x8b5a2b, sw: 0x222222, bk: 0x222222, bl: 0x1c7ed6, bu: 0x1c7ed6, rt: 0xe03131, rd: 0xe03131,
   gn: 0x2f9e44, ge: 0xf2c200, ye: 0xf2c200, gnge: 0x8bc34a, gnye: 0x8bc34a, ws: 0xf1f3f5, wh: 0xf1f3f5, gr: 0x868e96, gy: 0x868e96, or: 0xfd7e14, og: 0xfd7e14 };
 const SRC_COL = '#2f9e44', DST_COL = '#1971c2', CABLE_COL = 0xf2b705;
+// Aderfarbe aus der Eingabe: Kürzel (DIN: rt, bl, sw … / IEC: RD, BU, BK …) oder Wort (rot, dunkelblau, grün-gelb …).
+// Ergebnis: eine oder zwei Farben (zweifarbig = gestreift, z. B. grün-gelb).
+const COLOR_WORDS = { rot: 0xe03131, blau: 0x1c7ed6, dunkelblau: 0x1c3f94, dbl: 0x1c3f94, hellblau: 0x74c0fc, hbl: 0x74c0fc, schwarz: 0x222222, braun: 0x8b5a2b,
+  grün: 0x2f9e44, gruen: 0x2f9e44, gelb: 0xf2c200, weiß: 0xf1f3f5, weiss: 0xf1f3f5, grau: 0x868e96, orange: 0xfd7e14, violett: 0x7048e8, lila: 0x7048e8,
+  vt: 0x7048e8, rosa: 0xf783ac, pink: 0xf783ac, rs: 0xf783ac, pk: 0xf783ac, türkis: 0x15aabf, tuerkis: 0x15aabf, tk: 0x15aabf, tq: 0x15aabf,
+  red: 0xe03131, blue: 0x1c7ed6, black: 0x222222, brown: 0x8b5a2b, green: 0x2f9e44, yellow: 0xf2c200, white: 0xf1f3f5, grey: 0x868e96, gray: 0x868e96, violet: 0x7048e8 };
+function wireColors(txt) {
+  let t = String(txt || '').toLowerCase().replace(/\s+/g, ' ').trim(); if (!t) return null;
+  const one = (w) => WIRE_COLORS[w] ?? COLOR_WORDS[w];
+  if (one(t.replace(/[ /+-]/g, '')) !== undefined && !/^(gnge|gnye|grüngelb|gruengelb)$/.test(t.replace(/[ /+-]/g, ''))) return [one(t.replace(/[ /+-]/g, ''))];
+  if (/^(gn ?[/+-]? ?(ge|ye)|grün ?[/+-]? ?gelb|gruen ?[/+-]? ?gelb|green ?[/+-]? ?yellow|pe)$/.test(t)) return [0x2f9e44, 0xf2c200];
+  const parts = t.split(/[ /+-]+/).map(one).filter(v => v !== undefined);
+  return parts.length ? parts.slice(0, 2) : null;
+}
+const stripeTex = new Map();
+function wireMaterial(cols) {
+  if (!cols) return new THREE.MeshStandardMaterial({ color: CABLE_COL, roughness: 0.45, emissive: CABLE_COL, emissiveIntensity: 0.15 });
+  if (cols.length === 1) return new THREE.MeshStandardMaterial({ color: cols[0], roughness: 0.45, emissive: cols[0], emissiveIntensity: 0.12 });
+  const key = cols.join('-');
+  if (!stripeTex.has(key)) {           // Streifen wie bei grün-gelber Schutzleiter-Ader
+    const cv = document.createElement('canvas'); cv.width = 64; cv.height = 64; const g = cv.getContext('2d');
+    for (let i = 0; i < 4; i++) { g.fillStyle = '#' + cols[i % 2].toString(16).padStart(6, '0'); g.fillRect(0, i * 16, 64, 16); }
+    const tx = new THREE.CanvasTexture(cv); tx.wrapS = tx.wrapT = THREE.RepeatWrapping; tx.repeat.set(3, 1); tx.colorSpace = THREE.SRGBColorSpace; stripeTex.set(key, tx);
+  }
+  return new THREE.MeshStandardMaterial({ map: stripeTex.get(key), roughness: 0.45 });
+}
 let pickMode = null;      // {bmk, mode:'part'|'marker'}
 let wireGroup = null;
 
@@ -1161,7 +1187,10 @@ function anchorOf(bmk, towards) {
   if (m && m.type === 'marker') return new THREE.Vector3().fromArray(m.p);
   if (m && m.type === 'part' && m.ids.length) {
     const b = partsBox(m.ids);
-    return towards ? b.clampPoint(towards, new THREE.Vector3()) : b.getCenter(new THREE.Vector3());
+    // Anschluss auf der Oberseite des Teils (Richtung „oben“), möglichst zur Gegenseite hin
+    const p = towards ? b.clampPoint(towards, new THREE.Vector3()) : b.getCenter(new THREE.Vector3());
+    if (S.meta.upAxis === 'y') p.y = b.max.y; else p.z = b.max.z;
+    return p;
   }
   return null;
 }
@@ -1214,7 +1243,7 @@ function applyWireStep(st) {
     return fallback.get(e.bmk);
   };
   const labels = new Map();
-  const pairs = new Map();
+  const stubCount = new Map();
   ws.forEach((c, i) => {
     let A0 = anchor(c.a, null), B0 = anchor(c.b, null);
     const a = c.a.kind === 'ext' ? null : anchor(c.a, B0 || A0), b = c.b.kind === 'ext' ? null : anchor(c.b, A0 || B0);
@@ -1222,19 +1251,28 @@ function applyWireStep(st) {
     if (!pa && pb) { const out = pb.clone().sub(center).normalize(); pa = pb.clone().add(out.multiplyScalar(diag * 0.22)); }
     if (!pb && pa) { const out = pa.clone().sub(center).normalize(); pb = pa.clone().add(out.multiplyScalar(diag * 0.22)); }
     if (!pa || !pb) return;
-    const key = [short(c.a).split(':')[0], short(c.b).split(':')[0]].join('|');
-    const n = pairs.get(key) || 0; pairs.set(key, n + 1);
-    const mid = pa.clone().add(pb).multiplyScalar(0.5);
-    const out = mid.clone().sub(center); if (out.lengthSq() < 1) out.copy(up); out.normalize();
-    const len = pa.distanceTo(pb);
-    const ctrl = mid.add(out.multiplyScalar(len * 0.25 + diag * 0.02)).add(up.clone().multiplyScalar(len * 0.12 + n * diag * 0.012));
-    const curve = new THREE.QuadraticBezierCurve3(pa, ctrl, pb);
-    const col = WIRE_COLORS[(c.color || '').toLowerCase()] ?? CABLE_COL;
-    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, diag * 0.0035, 8, false), new THREE.MeshStandardMaterial({ color: col, roughness: 0.45, emissive: col, emissiveIntensity: 0.15 }));
-    wireGroup.add(tube);
-    for (const p of [pa, pb]) { const s = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.007, 12, 8), new THREE.MeshStandardMaterial({ color: col })); s.position.copy(p); wireGroup.add(s); }
-    box.expandByPoint(pa); box.expandByPoint(pb); box.expandByPoint(ctrl);
-    for (const [e, p] of [[c.a, pa], [c.b, pb]]) {
+    // Nur Anschluss und ein kurzes Aderstück zeigen – der Kabelverlauf ist im Modell noch nicht bekannt
+    const mat = wireMaterial(wireColors(c.color));
+    const stubLen = diag * 0.07;
+    const tips = [];
+    for (const [p, q, real] of [[pa, pb, !!a], [pb, pa, !!b]]) {
+      if (!real) { tips.push(null); continue; }
+      const key = p.toArray().map(v => v.toFixed(1)).join(',');
+      const n = stubCount.get(key) || 0; stubCount.set(key, n + 1);
+      const toward = q.clone().sub(p); toward.sub(up.clone().multiplyScalar(toward.dot(up))); if (toward.lengthSq() < 1e-6) toward.set(1, 0, 0); toward.normalize();
+      const side = new THREE.Vector3().crossVectors(up, toward).normalize();
+      const start = p.clone().add(side.clone().multiplyScalar((n % 2 ? -1 : 1) * Math.ceil(n / 2) * diag * 0.011));
+      const dir = toward.multiplyScalar(0.55).add(up.clone().multiplyScalar(0.85)).normalize();
+      const tip = start.clone().add(dir.clone().multiplyScalar(stubLen));
+      const bend = start.clone().add(up.clone().multiplyScalar(stubLen * 0.55));
+      const curve = new THREE.QuadraticBezierCurve3(start, bend, tip);
+      wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0042, 10, false), mat));
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0045, 12, 8), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
+      box.expandByPoint(start); box.expandByPoint(tip); tips.push(tip);
+    }
+    if (!a && tips[1]) pa = tips[1].clone().add(up.clone().multiplyScalar(diag * 0.02));   // Ziel außerhalb: Hinweis am Aderende
+    if (!b && tips[0]) pb = tips[0].clone().add(up.clone().multiplyScalar(diag * 0.02));
+    for (const [e, p] of [[c.a, a ? tips[0] : pa], [c.b, b ? tips[1] : pb]]) {
       const k = e.kind === 'ext' ? 'ext|' + e.ext + '|' + e.sig : e.bmk;
       if (!labels.has(k)) labels.set(k, { e, p, pins: new Set() });
       if (e.pin) labels.get(k).pins.add(e.pin);
@@ -1246,7 +1284,7 @@ function applyWireStep(st) {
     if (e.kind === 'ext') { text = '→ ' + (e.sig || e.ext); col = '#495057'; }
     else { text = shortBmk(e.bmk) + (L.pins.size && !isDev(e.bmk) ? ' ' + [...L.pins].join(' / ') : ''); col = isDev(e.bmk) ? SRC_COL : DST_COL; }
     const sp = labelSprite(text, col);
-    sp.position.copy(L.p).add(up.clone().multiplyScalar(diag * (e.kind === 'dev' ? 0.06 : 0.025)));
+    sp.position.copy(L.p); sp.center.set(0.5, -0.35);   // Schild über dem Aderende, Ader bleibt sichtbar
     wireGroup.add(sp);
     // nicht platzierte Klemmleiste als Würfel andeuten
     if (e.kind === 'term' && !(E.map[e.bmk] && E.map[e.bmk].type === 'part')) {
@@ -1336,7 +1374,7 @@ function renderElec(el) {
   }));
   $$('input[data-elad]', el).forEach(i => i.addEventListener('change', e => {
     const c = E.conns.find(x => x.id === e.target.dataset.elad); const t = e.target.value.trim().split(/\s+/);
-    c.color = t[0] && !/\d/.test(t[0]) ? t[0] : ''; c.cs = t.filter(x => /\d/.test(x)).join(' ').replace(/(\d)$/, '$1 mm²').replace(/mm² mm²/, 'mm²'); regenTexts();
+    c.color = t.filter(x => x && !/\d/.test(x) && !/^mm/i.test(x)).join('-'); c.cs = t.filter(x => /\d/.test(x)).join(' ').replace(/(\d)$/, '$1 mm²').replace(/mm² mm²/, 'mm²'); regenTexts();
   }));
 }
 // Vorschau: zugeordnetes Teil kurz grün zeigen
