@@ -623,6 +623,15 @@ function onPick(e) {
   const hit = rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.ghost), false)[0];
   if (pickMode) {
     if (!hit) return;
+    if (pickMode.mode === 'wire') {             // Aderende genau setzen: Punkt + Flächenrichtung
+      const c = elecInit().conns.find(x => x.id === pickMode.conn); const side = pickMode.side;
+      const nrm = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : null;
+      if (nrm && nrm.dot(rc.ray.direction) > 0) nrm.negate();       // zur Kamera hin zeigen
+      if (c) { c.pos = c.pos || {}; c.pos[side] = { p: hit.point.toArray(), n: nrm ? nrm.toArray() : null }; }
+      const next = c && side === 'a' && c.b.kind !== 'ext' && !(c.pos && c.pos.b) && pickMode.chain ? { mode: 'wire', conn: c.id, side: 'b' } : null;
+      toast(c ? `${short(c[side])}: Anschluss gesetzt` + (next ? ` – jetzt ${short(c.b)} antippen` : '') : 'Gesetzt');
+      pickMode = next; thumbs.delete(S.steps[S.sel]?.uid); renderIns(); showStep(S.sel); scheduleThumbs(); return;
+    }
     const E = elecInit(); const b = pickMode.bmk;
     if (pickMode.mode === 'marker') E.map[b] = { type: 'marker', p: hit.point.toArray() };
     else E.map[b] = { type: 'part', ids: [hit.object.userData.id] };
@@ -698,6 +707,10 @@ const STYLE = `
 .el-tab input[type=checkbox]{width:18px;height:18px;min-height:0}
 .el-tab tr.off td{opacity:.5}
 .chip.scan{background:#fff6bf;color:#6b5a00}
+.wend{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 7px;font:inherit;font-size:13px;cursor:pointer;min-height:32px;white-space:nowrap}
+.wend:hover{border-color:var(--brand)}.wend.set{border-color:#2f9e44;background:#ebfbee}.wend.act{outline:2px solid var(--brand);outline-offset:1px}
+.wend-rs{border:0;background:none;cursor:pointer;color:var(--ink3);font-size:15px;padding:2px 4px;min-height:32px}
+tr.wpick td{background:#fff5f8}
 @media(min-width:1700px){.cad-work{grid-template-columns:340px minmax(0,1fr) 440px;gap:18px}}
 /* PC: Schrittliste, 3D-Ansicht und rechte Spalte bleiben stehen – Liste und rechte Spalte scrollen jeweils für sich */
 @media(min-width:1181px){.cad-work>.cad-list,.cad-work>.cad-viewer,.cad-work>.cad-ins{position:sticky;top:calc(128px + var(--safe-t, 0px))}
@@ -938,9 +951,17 @@ function renderIns() {
   on('cad-dir', 'change', e => { st.dir = +e.target.value; st.cam = null; afterChange(); });
   $$('select[data-move]', el).forEach(s => s.addEventListener('change', e => { const v = e.target.value; movePart(+e.target.dataset.move, v.startsWith('new') ? v : +v); }));
 }
+// Aderende in der Tabelle: antippen = Anschluss im 3D genau setzen; 📍 = gesetzt
+function endBtn(c, side) {
+  const e = c[side]; if (e.kind === 'ext') return esc(short(e));
+  const set = c.pos && c.pos[side]; const act = pickMode && pickMode.mode === 'wire' && pickMode.conn === c.id && pickMode.side === side;
+  return `<button class="wend ${set ? 'set' : ''} ${act ? 'act' : ''}" data-cad="wire-pos" data-id="${c.id}" data-side="${side}" title="Anschluss im 3D-Bild genau setzen">${esc(short(e))} <span aria-hidden="true">${set ? '📍' : '⌖'}</span></button>${set ? `<button class="wend-rs" data-cad="wire-posrs" data-id="${c.id}" data-side="${side}" title="Gesetzte Position entfernen" aria-label="Position zurücksetzen">↺</button>` : ''}`;
+}
 function renderWireIns(el, st) {
   const ws = wiresOf(st);
-  el.innerHTML = `<div class="card stack">
+  const pm = pickMode && pickMode.mode === 'wire' ? elecInit().conns.find(x => x.id === pickMode.conn) : null;
+  el.innerHTML = `${pm ? `<div class="banner info" style="margin-bottom:10px"><b>${esc(short(pm[pickMode.side]))}:</b> Anschlussstelle im 3D-Bild antippen (vorher heranzoomen). <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
+  <div class="card stack">
     <div><label class="f" for="cad-ti">Überschrift</label><input id="cad-ti" value="${esc(st.title)}" maxlength="70"></div>
     <div><label class="f" for="cad-tx">Montageanweisung <span class="tiny">(jede Zeile = ein Punkt)</span></label><textarea id="cad-tx" rows="5">${esc(st.text)}</textarea>
       <div class="tiny" style="margin-top:4px">${st.auto ? 'Automatisch aus dem Schaltplan erzeugt.' : 'Manuell bearbeitet.'} <button class="btn ghost sm" data-cad="regen" style="min-height:28px;padding:0 6px">neu erzeugen</button></div></div>
@@ -949,7 +970,7 @@ function renderWireIns(el, st) {
   </div>
   <div class="sect">Verkabelung in diesem Schritt</div>
   <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>von</th><th>nach</th><th>Ader</th><th></th></tr></thead><tbody>
-    ${ws.map(c => `<tr><td>${esc(short(c.a))}</td><td>${esc(short(c.b))}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
+    ${ws.map(c => `<tr class="${pickMode && pickMode.conn === c.id ? 'wpick' : ''}"><td>${endBtn(c, 'a')}</td><td>${endBtn(c, 'b')}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
   <div class="row" style="margin-top:10px"><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
   <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb), der Verlauf wird nicht gezeichnet. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
@@ -995,6 +1016,7 @@ function bindList() {
   list.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); $$('.cad-step.drag-over', list).forEach(x => x.classList.remove('drag-over')); const li = e.target.closest('.cad-step'); if (li && dragFrom !== null) moveStep(dragFrom, +li.dataset.i); dragFrom = null; });
 }
 function select(i) {
+  if (pickMode && pickMode.mode === 'wire') pickMode = null;
   S.sel = Math.max(0, Math.min(S.steps.length - 1, i));
   const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true;
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
@@ -1285,7 +1307,10 @@ function applyWireStep(st) {
   const stubCount = new Map();
   ws.forEach((c, i) => {
     let A0 = anchor(c.a, null), B0 = anchor(c.b, null);
-    const a = c.a.kind === 'ext' ? null : anchor(c.a, B0 || A0), b = c.b.kind === 'ext' ? null : anchor(c.b, A0 || B0);
+    let a = c.a.kind === 'ext' ? null : anchor(c.a, B0 || A0), b = c.b.kind === 'ext' ? null : anchor(c.b, A0 || B0);
+    const fix = c.pos || {};
+    const vA = fix.a && c.a.kind !== 'ext' ? new THREE.Vector3().fromArray(fix.a.p) : a, vB = fix.b && c.b.kind !== 'ext' ? new THREE.Vector3().fromArray(fix.b.p) : b;
+    a = vA; b = vB;
     let pa = a, pb = b;
     if (!pa && pb) { const out = pb.clone().sub(center).normalize(); pa = pb.clone().add(out.multiplyScalar(diag * 0.22)); }
     if (!pb && pa) { const out = pa.clone().sub(center).normalize(); pb = pa.clone().add(out.multiplyScalar(diag * 0.22)); }
@@ -1294,16 +1319,18 @@ function applyWireStep(st) {
     const mat = wireMaterial(wireColors(c.color));
     const stubLen = diag * 0.07;
     const tips = [];
-    for (const [p, q, real] of [[pa, pb, !!a], [pb, pa, !!b]]) {
+    for (const [p, q, real, fx] of [[pa, pb, !!a, fix.a], [pb, pa, !!b, fix.b]]) {
       if (!real) { tips.push(null); continue; }
       const key = p.toArray().map(v => v.toFixed(1)).join(',');
-      const n = stubCount.get(key) || 0; stubCount.set(key, n + 1);
+      const n = fx ? 0 : (stubCount.get(key) || 0); if (!fx) stubCount.set(key, n + 1);
       const toward = q.clone().sub(p); toward.sub(up.clone().multiplyScalar(toward.dot(up))); if (toward.lengthSq() < 1e-6) toward.set(1, 0, 0); toward.normalize();
       const side = new THREE.Vector3().crossVectors(up, toward).normalize();
       const start = p.clone().add(side.clone().multiplyScalar((n % 2 ? -1 : 1) * Math.ceil(n / 2) * diag * 0.011));
-      const dir = toward.multiplyScalar(0.55).add(up.clone().multiplyScalar(0.85)).normalize();
+      // Gesetztes Ende: Ader kommt senkrecht aus der angetippten Fläche; sonst schräg nach oben
+      const out = fx && fx.n ? new THREE.Vector3().fromArray(fx.n).normalize() : up;
+      const dir = toward.multiplyScalar(fx && fx.n ? 0.35 : 0.55).add(out.clone().multiplyScalar(0.85)).normalize();
       const tip = start.clone().add(dir.clone().multiplyScalar(stubLen));
-      const bend = start.clone().add(up.clone().multiplyScalar(stubLen * 0.55));
+      const bend = start.clone().add(out.clone().multiplyScalar(stubLen * 0.55));
       const curve = new THREE.QuadraticBezierCurve3(start, bend, tip);
       wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0042, 10, false), mat));
       const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0045, 12, 8), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
@@ -1380,7 +1407,7 @@ function renderElec(el) {
     <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:6px"><div><b>${esc(E.file ? E.file.name : 'Manuelle Eingabe')}</b><div class="tiny">${E.res.pages || 0} Seiten · ${E.conns.length} Verbindungen · ${E.devices.length} Geräte · ${E.terminals.length} Klemmleisten</div></div>
       <button class="btn sm ghost" data-cad="el-reset">Anderes PDF</button></div>
     ${E.err ? `<div class="warnbox">⚠ ${esc(E.err)}</div>` : ''}
-    ${pickMode ? `<div class="banner info"><b>${pickMode.mode === 'marker' ? 'Position für ' : 'Teil für '}${esc(shortBmk(pickMode.bmk))}</b> jetzt im 3D-Bild antippen. <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
+    ${pickMode && pickMode.mode !== 'wire' ? `<div class="banner info"><b>${pickMode.mode === 'marker' ? 'Position für ' : 'Teil für '}${esc(shortBmk(pickMode.bmk))}</b> jetzt im 3D-Bild antippen. <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
   </div>
   <div class="sect">Geräte und Klemmen im 3D-Modell</div>
   <div class="card" style="padding:8px 12px"><table class="cad-maptab"><colgroup><col style="width:34%"><col><col style="width:40px"></colgroup><tbody>
@@ -1500,6 +1527,8 @@ document.addEventListener('click', e => {
     case 'el-pickcancel': pickMode = null; return renderIns();
     case 'el-add': { const E = elecInit(); E.conns.unshift({ id: rid(), a: { kind: 'term', bmk: E.terminals[0] || 'X1', pin: '1' }, b: { kind: 'dev', bmk: (E.devices[0] || {}).bmk || 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); return renderIns(); }
     case 'el-build': return buildWireSteps();
+    case 'wire-pos': pickMode = { mode: 'wire', conn: el.dataset.id, side: el.dataset.side, chain: el.dataset.side === 'a' }; renderIns(); return toast('Anschlussstelle im 3D-Bild antippen');
+    case 'wire-posrs': { const c = elecInit().conns.find(x => x.id === el.dataset.id); if (c && c.pos) delete c.pos[el.dataset.side]; pickMode = null; thumbs.delete(S.steps[S.sel]?.uid); renderIns(); showStep(S.sel); return scheduleThumbs(); }
     case 'wire-rm': { const st = S.steps[S.sel]; st.wires = st.wires.filter(x => x !== el.dataset.id); return afterChange(); }
   }
 });
