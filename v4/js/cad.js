@@ -1214,6 +1214,8 @@ function applyWireStep(st) {
   return box;
 }
 
+let elMoreOpen = false;                               // „Weitere Kennzeichen“ bleibt offen, solange man darin arbeitet
+const natCmp = (a, b) => String(a).localeCompare(String(b), 'de', { numeric: true, sensitivity: 'base' });
 function renderElec(el) {
   const E = elecInit();
   if (E.busy) { el.innerHTML = '<div class="card"><span class="spin" style="display:inline-block;vertical-align:middle"></span> Schaltplan wird ausgewertet…</div>'; return; }
@@ -1232,10 +1234,12 @@ function renderElec(el) {
     z.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) loadSchematic(f); });
     return;
   }
-  const partOpts = (cur) => '<option value="">— nicht in dieser Baugruppe —</option>' + S.parts.map(p => {
+  const optList = S.parts.map(p => {                  // alphabetisch (Zahlen natürlich: Teil 2 vor Teil 10)
     const si = S.steps.findIndex(s => s.parts.includes(p.id));
-    return `<option value="${p.id}" ${cur && cur.type === 'part' && cur.ids[0] === p.id ? 'selected' : ''}>${esc(labelOf(p))}${si >= 0 ? ' (Schritt ' + (si + 1) + ')' : ''}</option>`;
-  }).join('') + (cur && cur.type === 'marker' ? '<option value="marker" selected>📍 Position gesetzt</option>' : '');
+    return { id: p.id, t: labelOf(p) + (si >= 0 ? ' (Schritt ' + (si + 1) + ')' : '') };
+  }).sort((a, b) => natCmp(a.t, b.t));
+  const partOpts = (cur) => '<option value="">— nicht in dieser Baugruppe —</option>' + optList.map(o =>
+    `<option value="${o.id}" ${cur && cur.type === 'part' && cur.ids[0] === o.id ? 'selected' : ''}>${esc(o.t)}</option>`).join('') + (cur && cur.type === 'marker' ? '<option value="marker" selected>📍 Position gesetzt</option>' : '');
   const bmkRow = (b, kind) => {
     const m = E.map[b]; const d = E.devices.find(x => x.bmk === b);
     const st = m ? '<span class="chip" style="background:var(--ok-soft);color:var(--ok)">✓</span>' : '<span class="chip">–</span>';
@@ -1244,10 +1248,13 @@ function renderElec(el) {
       <div class="row" style="gap:4px;margin-top:4px"><button class="btn sm ghost" data-cad="el-pick" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">im 3D wählen</button>${kind === 'term' ? `<button class="btn sm ghost" data-cad="el-mark" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">📍 Position setzen</button>` : ''}</div></td><td>${st}</td></tr>`;
   };
   const used = E.conns.filter(c => c.use).length;
-  const relevantDevs = E.devices.filter(d => E.map[d.bmk] || E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === d.bmk)));
-  const otherDevs = E.devices.filter(d => !relevantDevs.includes(d));
-  const termsUsed = E.terminals.filter(t => E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === t)) || E.map[t]);
-  const termsOther = E.terminals.filter(t => !termsUsed.includes(t));
+  const relevantDevs = E.devices.filter(d => E.map[d.bmk] || E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === d.bmk))).sort((a, b) => natCmp(shortBmk(a.bmk), shortBmk(b.bmk)));
+  const otherDevs = E.devices.filter(d => !relevantDevs.includes(d)).sort((a, b) => natCmp(shortBmk(a.bmk), shortBmk(b.bmk)));
+  const termsUsed = E.terminals.filter(t => E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === t)) || E.map[t]).sort((a, b) => natCmp(shortBmk(a), shortBmk(b)));
+  const termsOther = E.terminals.filter(t => !termsUsed.includes(t)).sort((a, b) => natCmp(shortBmk(a), shortBmk(b)));
+  // Scrollposition merken – nach einer Auswahl soll die Liste nicht nach oben springen
+  let scroller = el; while (scroller && scroller !== document.body && scroller.scrollHeight <= scroller.clientHeight) scroller = scroller.parentElement;
+  const keepTop = scroller ? scroller.scrollTop : 0;
   const sortedConns = E.conns.slice().sort((x, y) => (y.use - x.use));
   el.innerHTML = `
   <div class="card stack">
@@ -1261,7 +1268,7 @@ function renderElec(el) {
     ${relevantDevs.map(d => bmkRow(d.bmk, 'dev')).join('')}${termsUsed.map(t => bmkRow(t, 'term')).join('')}
     ${!relevantDevs.length && !termsUsed.length ? '<tr><td colspan="3" class="small muted">Noch nichts zugeordnet. Wähle unten bei „Weitere“ das passende Teil.</td></tr>' : ''}
   </tbody></table>
-  ${otherDevs.length || termsOther.length ? `<details style="margin-top:6px"><summary class="small" style="cursor:pointer">Weitere Kennzeichen im Plan (${otherDevs.length + termsOther.length})</summary><table class="cad-maptab"><colgroup><col style="width:34%"><col><col style="width:40px"></colgroup><tbody>${otherDevs.map(d => bmkRow(d.bmk, 'dev')).join('')}${termsOther.map(t => bmkRow(t, 'term')).join('')}</tbody></table></details>` : ''}
+  ${otherDevs.length || termsOther.length ? `<details id="el-more" style="margin-top:6px" ${elMoreOpen ? 'open' : ''}><summary class="small" style="cursor:pointer">Weitere Kennzeichen im Plan (${otherDevs.length + termsOther.length})</summary><table class="cad-maptab"><colgroup><col style="width:34%"><col><col style="width:40px"></colgroup><tbody>${otherDevs.map(d => bmkRow(d.bmk, 'dev')).join('')}${termsOther.map(t => bmkRow(t, 'term')).join('')}</tbody></table></details>` : ''}
   <p class="tiny" style="margin:6px 0 0">Klemmen, die im Modell fehlen, mit „📍 Position setzen“ einmal im 3D-Bild markieren.</p></div>
   <div class="sect">Verbindungen (${used} für diese Baugruppe)</div>
   <div class="card" style="padding:6px 8px;overflow-x:auto"><table class="cad-ptab el-tab"><thead><tr><th></th><th>von</th><th>nach</th><th>Ader</th></tr></thead><tbody>
@@ -1272,6 +1279,8 @@ function renderElec(el) {
   <button class="btn sm" data-cad="el-add" style="margin-top:6px">+ Verbindung</button></div>
   <button class="btn primary block" data-cad="el-build" style="margin-top:12px" ${used ? '' : 'disabled'}>Verdrahtungsschritte erzeugen (${used})</button>
   <p class="tiny">Die Schritte kommen nach der Verschraubung: je Gerät ein Schritt, dann Brücken und Zuleitungen. Vorhandene Verdrahtungsschritte werden ersetzt.</p>`;
+  if (scroller) scroller.scrollTop = keepTop;
+  const more = $('#el-more', el); if (more) more.addEventListener('toggle', () => { elMoreOpen = more.open; });
   $$('select[data-elmap]', el).forEach(s => s.addEventListener('change', e => {
     const b = e.target.dataset.elmap, v = e.target.value;
     if (v === '') delete E.map[b]; else if (v !== 'marker') E.map[b] = { type: 'part', ids: [+v] };
