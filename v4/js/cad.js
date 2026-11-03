@@ -927,6 +927,7 @@ function renderIns() {
   </tbody></table></div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap">
     <button class="btn sm" data-cad="merge" ${S.sel === 0 ? 'disabled' : ''}>Mit vorherigem zusammenfassen</button>
+    <button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button>
   </div>
   <p class="tiny">Tipp: Im 3D-Bild ein Teil antippen, um es in diesen Schritt zu holen. Schritte per Ziehen oder ▲▼ umsortieren.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
@@ -950,6 +951,7 @@ function renderWireIns(el, st) {
   <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>von</th><th>nach</th><th>Ader</th><th></th></tr></thead><tbody>
     ${ws.map(c => `<tr><td>${esc(short(c.a))}</td><td>${esc(short(c.b))}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
+  <div class="row" style="margin-top:10px"><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
   <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb), der Verlauf wird nicht gezeichnet. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
@@ -1008,10 +1010,30 @@ function moveStep(from, to) {
   S.sel = S.steps.findIndex(x => x.uid === (from === S.sel ? s.uid : keep));
   afterChange();
 }
+// Schritt löschen: seine Teile fallen aus der Anleitung (bleiben im 3D nur als Folgeteil sichtbar). Rückgängig per Hinweis.
+function deleteStep(i) {
+  const st = S.steps[i]; if (!st) return;
+  S.steps.splice(i, 1);
+  if (!S.steps.length) { S.steps.splice(i, 0, st); return toast('Der letzte Schritt kann nicht gelöscht werden'); }
+  thumbs.delete(st.uid);
+  S.sel = Math.min(i, S.steps.length - 1);
+  afterChange();
+  const n = st.kind === 'wire' ? wiresOf(st).length + ' Ader(n)' : st.parts.length + ' Teil' + (st.parts.length === 1 ? '' : 'e');
+  toast(`Schritt ${i + 1} gelöscht (${n})`, 'Rückgängig', () => {
+    const inUse = new Set(S.steps.flatMap(s => s.parts));
+    st.parts = st.parts.filter(id => !inUse.has(id));     // inzwischen anders verwendete Teile nicht doppeln
+    S.steps.splice(Math.min(i, S.steps.length), 0, st); S.sel = S.steps.indexOf(st);
+    afterChange();
+  });
+}
 // Teil verschieben: 'new' / 'new:after' = neuer Schritt direkt danach, 'new:before' = davor, Zahl = zu diesem Schritt.
 // Der bearbeitete Schritt bleibt ausgewählt, damit man weitere Teile verschieben kann.
 function movePart(id, to) {
-  const from = S.steps.find(s => s.parts.includes(id)); if (!from) return;
+  const from = S.steps.find(s => s.parts.includes(id));
+  if (!from) {                                  // Teil aus einem gelöschten Schritt wieder aufnehmen
+    const t = typeof to === 'number' ? S.steps[to] : S.steps[S.sel]; if (!t || t.kind === 'wire') return;
+    t.parts.push(id); afterChange(); return toast(`„${labelOf(S.parts[id])}“ wieder in Schritt ${S.steps.indexOf(t) + 1} aufgenommen`);
+  }
   const cur = S.steps[S.sel];
   let msg;
   if (typeof to === 'string') {
@@ -1460,6 +1482,7 @@ document.addEventListener('click', e => {
     case 'camsave': { const st = S.steps[S.sel]; st.cam = { p: camera.position.toArray(), t: controls.target.toArray(), near: camera.near, far: camera.far }; toast('Ansicht für Schritt ' + (S.sel + 1) + ' gemerkt'); thumbs.delete(st.uid); return renderWork(); }
     case 'camauto': S.steps[S.sel].cam = null; showStep(S.sel); return scheduleThumbs();
     case 'regen': { const st = S.steps[S.sel]; st.auto = true; st.toolsEdited = false; return afterChange(); }
+    case 'delstep': return deleteStep(S.sel);
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
     case 'movehere': { const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true; return movePart(+el.dataset.id, S.sel); }
     case 'pickclose': { const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true; return; }
