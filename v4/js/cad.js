@@ -521,8 +521,10 @@ function setUp() {
 const DIRV = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(a => new THREE.Vector3(...a));
 const isoDir = () => S.meta.upAxis === 'y' ? new THREE.Vector3(1, 0.9, 1.25).normalize() : new THREE.Vector3(1, -1.25, 0.9).normalize();
 function partsBox(ids) { const b = new THREE.Box3(); ids.forEach(id => b.union(S.parts[id].box)); return b; }
+// Bild eines Schritts: mit Pfeil (Teil vor der Einbaulage) oder eingebaut. Ohne eigene Wahl gilt der Schalter „Explosion“.
+const showsArrow = (st) => st.view ? st.view === 'explode' : S.meta.explode;
 function explodeOffset(si) {
-  const st = S.steps[si]; if (!S.meta.explode || st.kind === 'base' || st.dir < 0) return null;
+  const st = S.steps[si]; if (!showsArrow(st) || st.kind === 'base' || st.dir < 0) return null;
   const sz = partsBox(st.parts).getSize(new THREE.Vector3());
   const along = [sz.x, sz.y, sz.z][st.dir >> 1];
   const diag = modelBox.getSize(new THREE.Vector3()).length();
@@ -815,7 +817,7 @@ function renderWork() {
     <div class="cad-list" id="cad-list">${S.steps.map((s, i) => `
       <div class="cad-step ${i === S.sel ? 'sel' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
         <span class="num">${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
-        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}</div></div>
+        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && s.dir >= 0 ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : '■ eingebaut'}</span>` : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
       </div>`).join('')}</div>
     <div class="banner" id="cad-gpu" ${gpuLost ? '' : 'hidden'} style="grid-column:1/-1">Der Grafikspeicher reicht für dieses Modell nicht – Bilder und 3D-Ansicht bleiben leer. Bitte „Andere Dateien“ wählen, Detailgrad <b>„Grob“</b> einstellen und die Analyse erneut starten.</div>
@@ -823,7 +825,7 @@ function renderWork() {
       <div class="cad-vtop">
         <div class="cad-vtitle"><div class="k" id="cad-vk"></div><div class="h" id="cad-vh"></div></div>
         <div class="cad-tools">
-          <button class="cad-tg" data-cad="explode" aria-pressed="${S.meta.explode}">Explosion</button>
+          <button class="cad-tg" data-cad="explode" aria-pressed="${S.meta.explode}" title="Pfeilansicht für alle Schritte ein/aus – einzelne Schritte rechts unter „Bild“ umstellen">Explosion</button>
           <button class="cad-tg" data-cad="ghost" aria-pressed="${S.meta.ghost}">Folgeteile</button>
           <button class="cad-tg" data-cad="camsave">Ansicht merken</button>
           <button class="cad-tg" data-cad="camauto">Auto</button>
@@ -842,7 +844,7 @@ function renderWork() {
   <div class="bottom"><div class="bottom-in"><button class="btn" data-cad="restart">Andere Dateien</button><button class="btn primary" data-cad="takeover">Als Anleitung übernehmen</button></div></div>`;
   attachViewer($('#cad-viewer', ROOT));
   renderIns(); updateHead(); showStep(S.sel);
-  if (!thumbs.size) requestAnimationFrame(makeThumbs);
+  if (S.steps.some(s => !thumbs.has(s.uid))) requestAnimationFrame(makeThumbs);   // fehlende Bilder (neu oder geändert) erzeugen
   bindList();
 }
 function updateHead() {
@@ -868,6 +870,10 @@ function renderIns() {
       <div><label class="f" for="cad-to">Werkzeug</label><input id="cad-to" value="${esc(st.tools)}" placeholder="z. B. Torx TX20"></div>
       <div><label class="f" for="cad-dir">Montagerichtung</label><select id="cad-dir" class="cad-dirsel"><option value="-1">keine</option>${DIRWORD[S.meta.upAxis].map((w, i) => `<option value="${i}" ${st.dir === i ? 'selected' : ''}>${w.replace('von ', 'Von ')}</option>`).join('')}</select></div>
     </div>
+    <div><span class="f" id="cad-vw-l">Bild</span>${st.kind === 'base' || st.dir < 0
+      ? '<div class="tiny">Ohne Montagerichtung wird das Teil in Einbaulage gezeigt.</div>'
+      : `<div class="seg" role="group" aria-labelledby="cad-vw-l"><button class="${showsArrow(st) ? 'on' : ''}" aria-pressed="${showsArrow(st)}" data-cad="view:explode">➜ Mit Pfeil</button><button class="${showsArrow(st) ? '' : 'on'}" aria-pressed="${!showsArrow(st)}" data-cad="view:final">■ Eingebaut</button></div>
+      <div class="tiny" style="margin-top:4px">${st.view ? 'Für diesen Schritt festgelegt.' : 'Folgt dem Schalter „Explosion“ (gilt für alle Schritte).'}</div>`}</div>
     <div><label class="f" for="cad-no">Wichtiger Hinweis</label><textarea id="cad-no" rows="2" placeholder="z. B. Kabel vorher durchführen, Gewinde sichern">${esc(st.note)}</textarea></div>
   </div>
   <div class="sect">Material in diesem Schritt</div>
@@ -1342,7 +1348,8 @@ document.addEventListener('click', e => {
     case 'prev': return select(S.sel - 1);
     case 'next': return select(S.sel + 1);
     case 'ins': insTab = x; renderInsTabs(); return renderIns();
-    case 'explode': S.meta.explode = !S.meta.explode; el.setAttribute('aria-pressed', S.meta.explode); showStep(S.sel); return scheduleThumbs();
+    case 'explode': S.meta.explode = !S.meta.explode; S.steps.forEach(s => { delete s.view; }); thumbs.clear(); el.setAttribute('aria-pressed', S.meta.explode); renderWork(); return;
+    case 'view': { const st = S.steps[S.sel]; st.view = x; thumbs.delete(st.uid); showStep(S.sel); renderWork(); return; }
     case 'ghost': S.meta.ghost = !S.meta.ghost; el.setAttribute('aria-pressed', S.meta.ghost); applyStep(S.sel); return scheduleThumbs();
     case 'camsave': { const st = S.steps[S.sel]; st.cam = { p: camera.position.toArray(), t: controls.target.toArray(), near: camera.near, far: camera.far }; toast('Ansicht für Schritt ' + (S.sel + 1) + ' gemerkt'); thumbs.delete(st.uid); return renderWork(); }
     case 'camauto': S.steps[S.sel].cam = null; showStep(S.sel); return scheduleThumbs();
