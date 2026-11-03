@@ -31,9 +31,28 @@ const LABELS = {
 /* ---------- Textmaß-Schätzung ---------- */
 function lineH(pt) { return pt * 1.2 / 72; }
 function charW(pt, bold) { return pt * (bold ? 0.56 : 0.52) / 72; }
+/* Textbreite in Zoll – gemessen in der Folienschrift (Calibri; sonst ähnlich breite Ersatzschrift).
+   Kleiner Sicherheitszuschlag, damit eher eine Zeile zu viel als zu wenig eingeplant wird. */
+let _mctx = null;
+function textW(t, pt, bold) {
+  try {
+    _mctx = _mctx || document.createElement('canvas').getContext('2d');
+    _mctx.font = `${bold ? '700 ' : ''}${(pt * 96 / 72).toFixed(2)}px Calibri, Carlito, "Segoe UI", Arial, sans-serif`;
+    return _mctx.measureText(t).width / 96 * 1.06;
+  } catch (e) { return t.length * charW(pt, bold); }
+}
 function countLines(text, w, pt, bold) {
-  const per = Math.max(1, Math.floor((w - 0.2) / charW(pt, bold)));
-  return String(text || '').split('\n').reduce((n, para) => n + Math.max(1, Math.ceil(para.length / per)), 0);
+  const avail = Math.max(0.1, w - 0.2);
+  return String(text || '').split('\n').reduce((n, para) => {
+    let lines = 1, cur = 0;
+    for (const word of para.split(/(?<=[\s\-\/])/)) {        // Umbruch nach Leerzeichen, Bindestrich, Schrägstrich
+      const ww = textW(word, pt, bold);
+      if (cur + ww <= avail || cur === 0) {
+        if (ww > avail) { lines += Math.ceil(ww / avail) - 1; cur = ww % avail; } else cur += ww;
+      } else { lines++; cur = ww > avail ? ww % avail : ww; if (ww > avail) lines += Math.ceil(ww / avail) - 1; }
+    }
+    return n + lines;
+  }, 0);
 }
 function textH(text, w, pt, bold) { return countLines(text, w, pt, bold) * lineH(pt) + 0.12; }
 
@@ -101,34 +120,38 @@ function arrangePhotos(photos) {
 }
 
 /* ---------- Bausteine rechte Spalte ---------- */
+/* Kompakte Tabellen: Zeilenhöhe = Text + kleiner Innenabstand (statt fester 0,4") */
+const TAB = { pt: 18, desc: 14, padV: 0.03, padH: 0.06 };
+const TAB_MARGIN = [TAB.padV, TAB.padH, TAB.padV, TAB.padH];
+const cellH = (text, w, pt, bold) => countLines(text, w - 2 * TAB.padH + 0.2, pt, bold) * lineH(pt) + 2 * TAB.padV;
+const ROW_MIN = lineH(TAB.pt) + 2 * TAB.padV;
+
 function materialTable(materials, y) {
-  const head = { fontSize: 18, bold: true, color: C.white, fill: C.black, align: 'left' };
+  const head = { fontSize: TAB.pt, bold: true, color: C.white, fill: C.black, align: 'left' };
   const rows = [[
     { text: 'Pos.', o: head }, { text: 'Artikelnummer', o: head },
     { text: 'Bezeichnung', o: head }, { text: 'Anz.', o: head }]];
-  const rowH = [0.4];
-  const colW = [0.53, 1.92, 3.43, 0.72];
+  const colW = [0.64, 1.9, 3.34, 0.72];
+  const rowH = [Math.max(ROW_MIN, ...rows[0].map((c, k) => cellH(c.text, colW[k], TAB.pt, true)))];
   if (materials.length) {
     materials.forEach((m, i) => {
       const fill = i % 2 === 0 ? C.white : C.zebra;
       const desc = m.description || m.number;
       rows.push([
-        { text: String(i + 1), o: { fontSize: 18, color: C.black, fill, align: 'center' } },
-        { text: m.number, o: { fontSize: 18, bold: true, color: C.artNo, fill, align: 'left' } },
-        { text: desc, o: { fontSize: 14, color: C.black, fill, align: 'left' } },
-        { text: `${m.quantity} x`, o: { fontSize: 18, color: C.black, fill, align: 'center' } }
+        { text: String(i + 1), o: { fontSize: TAB.pt, color: C.black, fill, align: 'center' } },
+        { text: m.number, o: { fontSize: TAB.pt, bold: true, color: C.artNo, fill, align: 'left' } },
+        { text: desc, o: { fontSize: TAB.desc, color: C.black, fill, align: 'left' } },
+        { text: `${m.quantity} x`, o: { fontSize: TAB.pt, color: C.black, fill, align: 'center' } }
       ]);
-      rowH.push(Math.max(0.4,
-        countLines(m.number, colW[1], 18, true) * lineH(18) + 0.1,
-        countLines(desc, colW[2], 14) * lineH(14) + 0.1));
+      rowH.push(Math.max(ROW_MIN, cellH(m.number, colW[1], TAB.pt, true), cellH(desc, colW[2], TAB.desc)));
     });
   } else {
-    const o = { fontSize: 18, color: C.black, fill: C.white };
+    const o = { fontSize: TAB.pt, color: C.black, fill: C.white };
     rows.push(['-', '-', '-', '-'].map((t, i) => ({ text: t, o: { ...o, align: i === 0 || i === 3 ? 'center' : 'left' } })));
-    rowH.push(0.4);
+    rowH.push(ROW_MIN);
   }
   const h = rowH.reduce((a, b) => a + b, 0);
-  return { type: 'table', x: RIGHT.x, y, w: RIGHT.w, h, colW, rowH, rows,
+  return { type: 'table', x: RIGHT.x, y, w: RIGHT.w, h, colW, rowH, rows, margin: TAB_MARGIN,
     border: { pt: 0.6, color: C.white }, kind: 'materials' };
 }
 
@@ -151,19 +174,19 @@ function rightColumn(els, { materials, bullets, cables, tools, hint, minInstrH }
   y += instrH + 0.1;
 
   if (cables.length) {
-    const head = { fontSize: 18, bold: true, color: C.black, fill: C.tool, align: 'left' };
+    const head = { fontSize: TAB.pt, bold: true, color: C.black, fill: C.tool, align: 'left' };
     const rows = [[{ text: 'Kabel', o: head }, { text: 'Von (Stecker/Pin)', o: head }, { text: 'Nach (Stecker/Pin)', o: head }]];
-    const rowH = [0.4];
+    const rowH = [ROW_MIN];
     cables.forEach((c, i) => {
       const fill = i % 2 === 0 ? C.white : C.wireZebra;
       rows.push([
-        { text: c.designation || '-', o: { fontSize: 18, bold: true, color: C.black, fill, align: 'left' } },
-        { text: c.from || '-', o: { fontSize: 18, color: C.black, fill, align: 'left' } },
-        { text: c.to || '-', o: { fontSize: 18, color: C.black, fill, align: 'left' } }]);
-      rowH.push(Math.max(0.4, ...[c.designation, c.from, c.to].map(t => countLines(t || '-', 2.2, 18) * lineH(18) + 0.1)));
+        { text: c.designation || '-', o: { fontSize: TAB.pt, bold: true, color: C.black, fill, align: 'left' } },
+        { text: c.from || '-', o: { fontSize: TAB.pt, color: C.black, fill, align: 'left' } },
+        { text: c.to || '-', o: { fontSize: TAB.pt, color: C.black, fill, align: 'left' } }]);
+      rowH.push(Math.max(ROW_MIN, ...[c.designation, c.from, c.to].map((t, k) => cellH(t || '-', 2.2, TAB.pt, k === 0))));
     });
     const h = rowH.reduce((a, b) => a + b, 0);
-    els.push({ type: 'table', x: RIGHT.x, y, w: RIGHT.w, h, colW: [2.2, 2.2, 2.2], rowH, rows,
+    els.push({ type: 'table', x: RIGHT.x, y, w: RIGHT.w, h, colW: [2.2, 2.2, 2.2], rowH, rows, margin: TAB_MARGIN,
       border: { pt: 0.5, color: C.wireBorder }, kind: 'cables' });
     y += h + 0.15;
   }

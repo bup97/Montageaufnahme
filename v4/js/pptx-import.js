@@ -5,38 +5,6 @@
 const PptxImport = (() => {
   const EMU = 914400;
 
-  /* ---------- Minimaler ZIP-Leser (Deflate über DecompressionStream) ---------- */
-  async function unzip(buf) {
-    const dv = new DataView(buf), u8 = new Uint8Array(buf);
-    let eocd = -1;
-    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 66000); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
-    if (eocd < 0) throw new Error('Keine gültige PowerPoint-Datei (.pptx).');
-    const count = dv.getUint16(eocd + 10, true);
-    let p = dv.getUint32(eocd + 16, true);
-    const dec = new TextDecoder();
-    const entries = new Map();
-    for (let n = 0; n < count; n++) {
-      if (dv.getUint32(p, true) !== 0x02014b50) break;
-      const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
-      const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
-      const lho = dv.getUint32(p + 42, true);
-      const name = dec.decode(u8.subarray(p + 46, p + 46 + nlen));
-      entries.set(name, { method, csize, lho });
-      p += 46 + nlen + xlen + clen;
-    }
-    async function bytes(name) {
-      const e = entries.get(name); if (!e) return null;
-      const start = e.lho + 30 + dv.getUint16(e.lho + 26, true) + dv.getUint16(e.lho + 28, true);
-      const raw = u8.subarray(start, start + e.csize);
-      if (e.method === 0) return raw.slice();
-      if (e.method !== 8) throw new Error('Nicht unterstütztes Packformat');
-      if (typeof DecompressionStream === 'undefined') throw new Error('Dieser Browser kann PowerPoint-Dateien nicht öffnen – bitte iOS/Browser aktualisieren.');
-      const ds = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-      return new Uint8Array(await new Response(ds).arrayBuffer());
-    }
-    return { has: n => entries.has(n), bytes, text: async n => { const b = await bytes(n); return b ? new TextDecoder().decode(b) : null; } };
-  }
-
   /* ---------- XML-Hilfen ---------- */
   const xml = s => new DOMParser().parseFromString(s, 'application/xml');
   const kids = (el, ln) => [...el.children].filter(c => c.localName === ln);
@@ -93,7 +61,7 @@ const PptxImport = (() => {
 
   /* Liefert { info, steps (Format wie V3-JSON), stats } */
   async function parse(file) {
-    const zip = await unzip(await file.arrayBuffer());
+    const zip = await Zip.read(await file.arrayBuffer());
     if (!zip.has('ppt/presentation.xml')) throw new Error('Keine PowerPoint-Datei.');
     const pres = xml(await zip.text('ppt/presentation.xml'));
     const pr = rels(xml(await zip.text('ppt/_rels/presentation.xml.rels')));
