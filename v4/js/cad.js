@@ -31,7 +31,7 @@ const digits = (s) => String(s ?? '').replace(/\D+/g, '');
 const cleanName = (n) => { const segs = String(n).split('_').map(s => s.trim()).filter(Boolean); return segs.length ? segs[0] : String(n); };
 const RX_FAST = /schraube|mutter|scheibe|schelle|niet|stift|clip|klammer|bolzen|sicherungsring|kabelbinder/i;
 const RX_ELASTIC = /schlauch|dichtung|manschette|gummi|tuelle|tülle|o-ring|oring|schaum/i;
-const toast = (m) => API?.toast ? API.toast(m) : console.log(m);
+const toast = (m, label, run) => API?.toast ? API.toast(m, label ? { label, run } : undefined) : console.log(m);
 
 // ======================= Stückliste lesen (xlsx ohne Bibliothek) =======================
 async function inflateRaw(u8) {
@@ -805,7 +805,31 @@ function mapStatus() {
   return { names, unmatched, qtyDiff, perRow };
 }
 let insTab = 'step';
+// Scrollpositionen (Seite, Schrittliste, Bearbeitungsspalte) über einen Neuaufbau retten
+function scrollState() {
+  const out = []; let n = ROOT;
+  while (n) { if (n.scrollTop) out.push([n, n.scrollTop]); n = n.parentElement; }
+  const se = document.scrollingElement; if (se && se.scrollTop && !out.some(x => x[0] === se)) out.push([se, se.scrollTop]);
+  const list = $('#cad-list', ROOT); return { out, list: list ? list.scrollTop : 0 };
+}
+function restoreScroll(k) {
+  if (!k) return;
+  k.out.forEach(([n, t]) => { n.scrollTop = t; });
+  const list = $('#cad-list', ROOT); if (list) list.scrollTop = k.list;
+}
+// ausgewählten Schritt in der Liste sichtbar machen – nur die Liste scrollen, nicht die Seite
+function revealSel() {
+  const list = $('#cad-list', ROOT), li = $(`.cad-step[data-i="${S.sel}"]`, ROOT); if (!list || !li) return;
+  if (list.scrollHeight <= list.clientHeight) return;
+  const top = li.offsetTop - list.offsetTop, bot = top + li.offsetHeight;
+  if (top < list.scrollTop) list.scrollTop = top - 4; else if (bot > list.scrollTop + list.clientHeight) list.scrollTop = bot - list.clientHeight + 4;
+}
+function refreshSel() {
+  $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
+  revealSel(); renderIns(); updateHead(); showStep(S.sel);
+}
 function renderWork() {
+  const keepScroll = ROOT && $('#cad-list', ROOT) ? scrollState() : null;
   const st = mapStatus();
   const warn = [...S.warnings];
   if (S.bom && st.unmatched) warn.push(st.unmatched + ' STEP-Teil(e) ohne Stücklistenposition – siehe „Zuordnung“.');
@@ -844,6 +868,7 @@ function renderWork() {
   <div class="bottom"><div class="bottom-in"><button class="btn" data-cad="restart">Andere Dateien</button><button class="btn primary" data-cad="takeover">Als Anleitung übernehmen</button></div></div>`;
   attachViewer($('#cad-viewer', ROOT));
   renderIns(); updateHead(); showStep(S.sel);
+  restoreScroll(keepScroll); revealSel();
   if (S.steps.some(s => !thumbs.has(s.uid))) requestAnimationFrame(makeThumbs);   // fehlende Bilder (neu oder geändert) erzeugen
   bindList();
 }
@@ -861,7 +886,10 @@ function renderIns() {
   const st = S.steps[S.sel]; if (!st) { el.innerHTML = ''; return; }
   if (st.kind === 'wire') return renderWireIns(el, st);
   const groups = stepGroups(st);
-  const stepOpts = S.steps.map((s, i) => s.kind === 'wire' ? '' : `<option value="${i}" ${i === S.sel ? 'selected' : ''}>Schritt ${i + 1}</option>`).join('') + '<option value="new">→ eigener Schritt</option>';
+  const cut = (t) => t.length > 34 ? t.slice(0, 33) + '…' : t;
+  const stepOpts = `<option value="${S.sel}" selected>Schritt ${S.sel + 1} (hier)</option>
+    <optgroup label="Als neuen Schritt einfügen"><option value="new:after">→ neuer Schritt ${S.sel + 2} (danach)</option><option value="new:before">→ neuer Schritt ${S.sel + 1} (davor)</option></optgroup>
+    <optgroup label="Zu bestehendem Schritt hinzufügen">${S.steps.map((s, i) => s.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(s.title || ''))}</option>`).join('')}</optgroup>`;
   el.innerHTML = `<div class="card stack">
     <div><label class="f" for="cad-ti">Überschrift</label><input id="cad-ti" value="${esc(st.title)}" maxlength="70"></div>
     <div><label class="f" for="cad-tx">Montageanweisung <span class="tiny">(jede Zeile = ein Punkt)</span></label><textarea id="cad-tx" rows="4">${esc(st.text)}</textarea>
@@ -890,7 +918,7 @@ function renderIns() {
   on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
   on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
   on('cad-dir', 'change', e => { st.dir = +e.target.value; st.cam = null; afterChange(); });
-  $$('select[data-move]', el).forEach(s => s.addEventListener('change', e => movePart(+e.target.dataset.move, e.target.value === 'new' ? 'new' : +e.target.value)));
+  $$('select[data-move]', el).forEach(s => s.addEventListener('change', e => { const v = e.target.value; movePart(+e.target.dataset.move, v.startsWith('new') ? v : +v); }));
 }
 function renderWireIns(el, st) {
   const ws = wiresOf(st);
@@ -951,7 +979,7 @@ function select(i) {
   S.sel = Math.max(0, Math.min(S.steps.length - 1, i));
   const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true;
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
-  $(`.cad-step[data-i="${S.sel}"]`, ROOT)?.scrollIntoView({ block: 'nearest' });
+  revealSel();
   if (insTab !== 'step') insTab = 'step';
   renderInsTabs(); renderIns(); updateHead(); showStep(S.sel);
 }
@@ -963,16 +991,30 @@ function moveStep(from, to) {
   S.sel = S.steps.findIndex(x => x.uid === (from === S.sel ? s.uid : keep));
   afterChange();
 }
+// Teil verschieben: 'new' / 'new:after' = neuer Schritt direkt danach, 'new:before' = davor, Zahl = zu diesem Schritt.
+// Der bearbeitete Schritt bleibt ausgewählt, damit man weitere Teile verschieben kann.
 function movePart(id, to) {
-  const from = S.steps.find(s => s.parts.includes(id));
-  if (to === 'new') {
+  const from = S.steps.find(s => s.parts.includes(id)); if (!from) return;
+  const cur = S.steps[S.sel];
+  let msg;
+  if (typeof to === 'string') {
+    const at = S.steps.indexOf(from) + (to === 'new:before' ? 0 : 1);
     from.parts = from.parts.filter(x => x !== id);
-    S.steps.splice(S.steps.indexOf(from) + 1, 0, { uid: rid(), parts: [id], dir: from.dir, kind: RX_FAST.test(labelOf(S.parts[id])) ? 'fast' : 'part', title: '', text: '', note: '', tools: '', auto: true, cam: null });
+    S.steps.splice(at, 0, { uid: rid(), parts: [id], dir: from.dir, kind: RX_FAST.test(labelOf(S.parts[id])) ? 'fast' : 'part', title: '', text: '', note: '', tools: '', auto: true, cam: null, view: from.view });
+    msg = `„${labelOf(S.parts[id])}“ ist jetzt eigener Schritt`;
   } else {
     const t = S.steps[to]; if (!t || t === from) return;
     from.parts = from.parts.filter(x => x !== id); t.parts.push(id);
+    msg = `„${labelOf(S.parts[id])}“ zu Schritt ${to + 1} hinzugefügt`;
   }
+  const target = S.steps.find(s => s.parts.includes(id));
+  // Auswahl auf dem bisherigen Schritt halten (falls er leer wurde: auf dem Ziel)
+  const keep = cur && cur.parts.length ? cur : target;
   afterChange();
+  S.sel = Math.max(0, S.steps.indexOf(keep));
+  const n = S.steps.indexOf(target) + 1;
+  refreshSel();
+  toast(msg.replace('eigener Schritt', 'eigener Schritt ' + n), 'Anzeigen', () => select(n - 1));
 }
 function afterChange() {
   S.steps = S.steps.filter(s => s.parts.length || (s.kind === 'wire' && wiresOf(s).length));
