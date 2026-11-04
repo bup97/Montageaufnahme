@@ -746,6 +746,10 @@ function initThree() {
   };
   arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ARROW), roughness: 0.45, emissive: 0x06223f });
   renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+  renderer.domElement.addEventListener('pointerdown', wirePointerDown);
+  renderer.domElement.addEventListener('pointermove', wirePointerMove);
+  renderer.domElement.addEventListener('pointerup', wirePointerUp);
+  renderer.domElement.addEventListener('pointerleave', () => { if (!wireDrag && hoverDot?.visible) showHoverDot(null); });
   renderer.domElement.addEventListener('pointerup', onPick);
   // Grafikspeicher knapp? Statt leerer Bilder einen verständlichen Hinweis zeigen
   renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); gpuLost = true; diag('Grafikspeicher: Zeichenfläche verloren (webglcontextlost)'); showGpuHint(); });
@@ -757,7 +761,7 @@ function initThree() {
   const loop = () => {
     requestAnimationFrame(loop);
     if (!renderer || gpuLost || !renderer.domElement.isConnected) return;
-    if (controls.update() || needRender) { needRender = false; renderer.render(scene, camera); }
+    if (controls.update() || needRender) { needRender = false; if (wireStepShown()) layoutWireLabels(camera); renderer.render(scene, camera); }
   };
   loop();
 }
@@ -885,6 +889,7 @@ function renderTo(si, w, h, bg) {
   offCamera.aspect = w / h; offCamera.updateProjectionMatrix();
   offscreen = true; try { applyStep(si); } finally { offscreen = false; }
   setCam(offCamera, camFor(si, offCamera, w / h));
+  if (S.steps[si]?.kind === 'wire') { if (hoverDot) hoverDot.visible = false; layoutWireLabels(offCamera); }
   renderer.render(scene, offCamera);
   ctx.drawImage(renderer.domElement, 0, 0, w, h);          // sofort abgreifen, solange der Puffer gefüllt ist
   renderer.setPixelRatio(prevPR); renderer.setSize(Math.max(1, prev.x), Math.max(1, prev.y), false);
@@ -900,6 +905,7 @@ function showGpuHint() {
   API?.toast?.('Der Grafikspeicher reicht für dieses Modell nicht. Bitte mit Detailgrad „Grob“ neu laden.');
 }
 function onPick(e) {
+  if (suppressPick) { suppressPick = false; return; }
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4) return;
   const r = renderer.domElement.getBoundingClientRect();
   const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
@@ -1314,7 +1320,7 @@ function endBtn(c, side) {
 function renderWireIns(el, st) {
   const ws = wiresOf(st);
   const pm = pickMode && pickMode.mode === 'wire' ? elecInit().conns.find(x => x.id === pickMode.conn) : null;
-  el.innerHTML = `${pm ? `<div class="banner info" style="margin-bottom:10px"><b>${esc(short(pm[pickMode.side]))}:</b> Anschlussstelle im 3D-Bild antippen (vorher heranzoomen). <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
+  el.innerHTML = `${pm ? `<div class="banner info" style="margin-bottom:10px"><b>${esc(short(pm[pickMode.side]))}:</b> Anschlussstelle im 3D-Bild antippen – der rote Punkt zeigt, wo das Ende landet (vorher heranzoomen). <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
   <div class="card stack">
     <div><label class="f" for="cad-ti">Überschrift</label><input id="cad-ti" value="${esc(st.title)}" maxlength="70"></div>
     <div><label class="f" for="cad-tx">Montageanweisung <span class="tiny">(jede Zeile = ein Punkt)</span></label><textarea id="cad-tx" rows="5">${esc(st.text)}</textarea>
@@ -1327,7 +1333,7 @@ function renderWireIns(el, st) {
     ${ws.map(c => `<tr class="${pickMode && pickMode.conn === c.id ? 'wpick' : ''}"><td>${endBtn(c, 'a')}</td><td>${endBtn(c, 'b')}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap"><button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''}>⤒ An den Anfang</button><button class="btn sm" data-cad="toend" ${S.sel === S.steps.length - 1 ? 'disabled' : ''}>⤓ Ans Ende</button><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
-  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb), der Verlauf wird nicht gezeichnet. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
+  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb). Aderenden lassen sich im 3D-Bild mit der Maus an die richtige Stelle ziehen. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
   on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
@@ -1627,9 +1633,106 @@ function clearWires() {
   wireGroup.clear();
 }
 // Szene für einen Verdrahtungsschritt; liefert die Box der beteiligten Punkte
+
+// ---------- Beschriftungen der Verdrahtung ohne Überlappung anordnen (im Bildraum, je Kamera) ----------
+const wireLabels = [], wireGrips = [], wireStubs = [];
+function layoutWireLabels(cam) {
+  if (!wireLabels.length) return;
+  cam.updateMatrixWorld(); cam.updateProjectionMatrix();
+  const P = cam.projectionMatrix.elements, placed = [];
+  const items = wireLabels.map(L => ({ L, a: L.anchor.clone().project(cam) })).sort((x, y) => y.a.y - x.a.y || x.a.x - y.a.x);
+  // Aderenden selbst nicht verdecken
+  items.forEach(it => placed.push({ x0: it.a.x - 0.012, x1: it.a.x + 0.012, y0: it.a.y - 0.012, y1: it.a.y + 0.012 }));
+  for (const pts of wireStubs) {               // Aderstücke selbst freihalten
+    const q = pts.map(v => v.clone().project(cam));
+    placed.push({ x0: Math.min(...q.map(v => v.x)) - 0.01, x1: Math.max(...q.map(v => v.x)) + 0.01, y0: Math.min(...q.map(v => v.y)) - 0.01, y1: Math.max(...q.map(v => v.y)) + 0.01 });
+  }
+  const hit = (r) => placed.some(q => r.x0 < q.x1 && r.x1 > q.x0 && r.y0 < q.y1 && r.y1 > q.y0);
+  for (const { L, a } of items) {
+    const w = L.sp.scale.x * P[0], h = L.sp.scale.y * P[5], g = h * 0.35;
+    const cands = [];
+    for (let ring = 0; ring < 6; ring++) {
+      const up = g + ring * h * 1.12;
+      for (const fx of [0, 0.62, -0.62, 1.24, -1.24]) cands.push([fx * w, up]);
+      if (ring < 3) for (const fx of [0, 0.62, -0.62]) cands.push([fx * w, -g - h - ring * h * 1.12]);   // darunter
+    }
+    let best = cands[0];
+    for (const c of cands) { const r = { x0: a.x + c[0] - w / 2 - 0.004, x1: a.x + c[0] + w / 2 + 0.004, y0: a.y + c[1] - 0.004, y1: a.y + c[1] + h + 0.004 }; if (!hit(r)) { best = c; break; } }
+    placed.push({ x0: a.x + best[0] - w / 2, x1: a.x + best[0] + w / 2, y0: a.y + best[1], y1: a.y + best[1] + h });
+    L.sp.center.set(0.5 - best[0] / w, -best[1] / h);
+    // Hinweislinie, wenn das Schild weggerückt ist
+    const moved = Math.abs(best[0]) > 1e-6 || Math.abs(best[1] - g) > 1e-6;
+    L.line.visible = moved;
+    if (moved) {
+      const ly = best[1] >= 0 ? a.y + best[1] : a.y + best[1] + h;
+      const end = new THREE.Vector3(a.x + best[0], ly, a.z).unproject(cam);
+      const pos = L.line.geometry.getAttribute('position'); pos.setXYZ(0, L.anchor.x, L.anchor.y, L.anchor.z); pos.setXYZ(1, end.x, end.y, end.z); pos.needsUpdate = true;
+      L.line.geometry.computeBoundingSphere();
+    }
+  }
+}
+const wireStepShown = () => S.steps[S.sel]?.kind === 'wire';
+
+// ---------- Aderenden genau platzieren: Vorschaupunkt beim Setzen, Enden mit der Maus ziehen ----------
+let hoverDot = null, wireDrag = null, dragMoved = false;
+function surfaceHit(e, cam) {
+  const r = renderer.domElement.getBoundingClientRect();
+  const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  const rc = new THREE.Raycaster(); rc.setFromCamera(v, cam || camera);
+  return { rc, hit: rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.ghost), false)[0] };
+}
+function showHoverDot(p) {
+  if (!hoverDot) {
+    hoverDot = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), new THREE.MeshBasicMaterial({ color: 0x952456, depthTest: false, transparent: true, opacity: 0.9 }));
+    hoverDot.renderOrder = 12; scene.add(hoverDot);
+  }
+  const diag = modelBox.getSize(new THREE.Vector3()).length();
+  hoverDot.scale.setScalar(diag * 0.004); hoverDot.visible = !!p; if (p) hoverDot.position.copy(p); needRender = true;
+}
+function hitToPos(hit, rc) {
+  const n = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : null;
+  if (n && n.dot(rc.ray.direction) > 0) n.negate();
+  return { p: hit.point.toArray(), n: n ? n.toArray() : null };
+}
+function wirePointerDown(e) {
+  if (!wireStepShown() || !wireGrips.length || e.button !== 0) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
+  const g = rc.intersectObjects(wireGrips, false)[0]; if (!g) return;
+  wireDrag = g.object.userData; dragMoved = false; controls.enabled = false;
+  renderer.domElement.setPointerCapture?.(e.pointerId); renderer.domElement.style.cursor = 'grabbing';
+}
+let dragRaf = 0;
+function wirePointerMove(e) {
+  if (wireDrag) {
+    const { rc, hit } = surfaceHit(e); if (!hit) return;
+    const c = elecInit().conns.find(x => x.id === wireDrag.conn); if (!c) return;
+    c.pos = c.pos || {}; c.pos[wireDrag.side] = hitToPos(hit, rc); dragMoved = true;
+    showHoverDot(hit.point);
+    if (!dragRaf) dragRaf = requestAnimationFrame(() => { dragRaf = 0; applyStep(S.sel); needRender = true; });
+    return;
+  }
+  if (pickMode && pickMode.mode === 'wire') { const { hit } = surfaceHit(e); showHoverDot(hit ? hit.point : null); renderer.domElement.style.cursor = hit ? 'crosshair' : ''; return; }
+  if (wireStepShown() && wireGrips.length) {
+    const r = renderer.domElement.getBoundingClientRect();
+    const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
+    renderer.domElement.style.cursor = rc.intersectObjects(wireGrips, false).length ? 'grab' : '';
+  }
+  if (hoverDot?.visible) showHoverDot(null);
+}
+function wirePointerUp() {
+  if (!wireDrag) return;
+  const moved = dragMoved; wireDrag = null; controls.enabled = true; renderer.domElement.style.cursor = '';
+  showHoverDot(null);
+  if (moved) { suppressPick = true; thumbs.delete(S.steps[S.sel]?.uid); renderIns(); applyStep(S.sel); scheduleThumbs(); histTrack(); scheduleSave(); toast('Aderende verschoben'); }
+}
+let suppressPick = false;
+
 function applyWireStep(st) {
   if (!wireGroup) { wireGroup = new THREE.Group(); scene.add(wireGroup); }
-  clearWires();
+  clearWires(); wireLabels.length = 0; wireGrips.length = 0; wireStubs.length = 0;
   const E = elecInit(); const ws = wiresOf(st);
   const diag = modelBox.getSize(new THREE.Vector3()).length(); const center = modelBox.getCenter(new THREE.Vector3());
   const up = S.meta.upAxis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
@@ -1673,7 +1776,7 @@ function applyWireStep(st) {
     const mat = wireMaterial(wireColors(c.color));
     const stubLen = diag * 0.07;
     const tips = [];
-    for (const [p, q, real, fx] of [[pa, pb, !!a, fix.a], [pb, pa, !!b, fix.b]]) {
+    for (const [p, q, real, fx, sideKey] of [[pa, pb, !!a, fix.a, 'a'], [pb, pa, !!b, fix.b, 'b']]) {
       if (!real) { tips.push(null); continue; }
       const key = p.toArray().map(v => v.toFixed(1)).join(',');
       const n = fx ? 0 : (stubCount.get(key) || 0); if (!fx) stubCount.set(key, n + 1);
@@ -1688,7 +1791,10 @@ function applyWireStep(st) {
       const curve = new THREE.QuadraticBezierCurve3(start, bend, tip);
       wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0042, 10, false), mat));
       const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0045, 12, 8), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
-      box.expandByPoint(start); box.expandByPoint(tip); tips.push(tip);
+      // unsichtbare, größere Greiffläche: Aderende mit der Maus verschieben
+      const grip = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.02, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+      grip.position.copy(start); grip.userData = { conn: c.id, side: sideKey }; wireGroup.add(grip); wireGrips.push(grip);
+      box.expandByPoint(start); box.expandByPoint(tip); tips.push(tip); wireStubs.push([start.clone(), bend.clone(), tip.clone()]);
     }
     if (!a && tips[1]) pa = tips[1].clone().add(up.clone().multiplyScalar(diag * 0.02));   // Ziel außerhalb: Hinweis am Aderende
     if (!b && tips[0]) pb = tips[0].clone().add(up.clone().multiplyScalar(diag * 0.02));
@@ -1706,6 +1812,10 @@ function applyWireStep(st) {
     const sp = labelSprite(text, col);
     sp.position.copy(L.p); sp.center.set(0.5, -0.35);   // Schild über dem Aderende, Ader bleibt sichtbar
     wireGroup.add(sp);
+    const lg = new THREE.BufferGeometry().setFromPoints([L.p.clone(), L.p.clone()]);
+    const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: col, depthTest: false, transparent: true, opacity: 0.85 }));
+    line.renderOrder = 9; line.visible = false; wireGroup.add(line);
+    wireLabels.push({ sp, anchor: L.p.clone(), line });
     // nicht platzierte Klemmleiste als Würfel andeuten
     if (e.kind === 'term' && !(E.map[e.bmk] && E.map[e.bmk].type === 'part')) {
       const cube = new THREE.Mesh(new THREE.BoxGeometry(diag * 0.022, diag * 0.022, diag * 0.022), mats.dst); cube.position.copy(L.p); wireGroup.add(cube);
