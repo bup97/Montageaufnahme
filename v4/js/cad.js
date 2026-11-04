@@ -918,7 +918,7 @@ function renderIns() {
   const groups = stepGroups(st);
   const cut = (t) => t.length > 34 ? t.slice(0, 33) + '…' : t;
   const stepOpts = `<option value="${S.sel}" selected>Schritt ${S.sel + 1} (hier)</option>
-    <optgroup label="Als neuen Schritt einfügen"><option value="new:after">→ neuer Schritt ${S.sel + 2} (danach)</option><option value="new:before">→ neuer Schritt ${S.sel + 1} (davor)</option></optgroup>
+    <optgroup label="Als neuen Schritt einfügen"><option value="new:after">→ neuer Schritt ${S.sel + 2} (danach)</option><option value="new:before">→ neuer Schritt ${S.sel + 1} (davor)</option><option value="new:end">→ neuer Schritt ${S.steps.length + 1} (ganz am Ende)</option></optgroup>
     <optgroup label="Zu bestehendem Schritt hinzufügen">${S.steps.map((s, i) => s.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(s.title || ''))}</option>`).join('')}</optgroup>`;
   el.innerHTML = `<div class="card stack">
     <div><label class="f" for="cad-ti">Überschrift</label><input id="cad-ti" value="${esc(st.title)}" maxlength="70"></div>
@@ -940,6 +940,8 @@ function renderIns() {
   </tbody></table></div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap">
     <button class="btn sm" data-cad="merge" ${S.sel === 0 ? 'disabled' : ''}>Mit vorherigem zusammenfassen</button>
+    <button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''} title="Direkt nach dem Grundteil einordnen">⤒ An den Anfang</button>
+    <button class="btn sm" data-cad="toend" ${S.sel === S.steps.length - 1 ? 'disabled' : ''}>⤓ Ans Ende</button>
     <button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button>
   </div>
   <p class="tiny">Tipp: Im 3D-Bild ein Teil antippen, um es in diesen Schritt zu holen. Schritte per Ziehen oder ▲▼ umsortieren.</p>`;
@@ -972,7 +974,7 @@ function renderWireIns(el, st) {
   <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>von</th><th>nach</th><th>Ader</th><th></th></tr></thead><tbody>
     ${ws.map(c => `<tr class="${pickMode && pickMode.conn === c.id ? 'wpick' : ''}"><td>${endBtn(c, 'a')}</td><td>${endBtn(c, 'b')}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
-  <div class="row" style="margin-top:10px"><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
+  <div class="row" style="margin-top:10px;flex-wrap:wrap"><button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''}>⤒ An den Anfang</button><button class="btn sm" data-cad="toend" ${S.sel === S.steps.length - 1 ? 'disabled' : ''}>⤓ Ans Ende</button><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
   <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb), der Verlauf wird nicht gezeichnet. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
@@ -1059,7 +1061,7 @@ function movePart(id, to) {
   const cur = S.steps[S.sel];
   let msg;
   if (typeof to === 'string') {
-    const at = S.steps.indexOf(from) + (to === 'new:before' ? 0 : 1);
+    const at = to === 'new:end' ? S.steps.length : S.steps.indexOf(from) + (to === 'new:before' ? 0 : 1);
     from.parts = from.parts.filter(x => x !== id);
     S.steps.splice(at, 0, { uid: rid(), parts: [id], dir: from.dir, kind: RX_FAST.test(labelOf(S.parts[id])) ? 'fast' : 'part', title: '', text: '', note: '', tools: '', auto: true, cam: null, view: from.view });
     msg = `„${labelOf(S.parts[id])}“ ist jetzt eigener Schritt`;
@@ -1510,6 +1512,8 @@ document.addEventListener('click', e => {
     case 'camauto': S.steps[S.sel].cam = null; showStep(S.sel); return scheduleThumbs();
     case 'regen': { const st = S.steps[S.sel]; st.auto = true; st.toolsEdited = false; return afterChange(); }
     case 'delstep': return deleteStep(S.sel);
+    case 'toend': { const i = S.sel; moveStep(i, S.steps.length - 1); return toast(`Schritt ${i + 1} ist jetzt der letzte (Schritt ${S.steps.length})`); }
+    case 'tostart': { const i = S.sel, to = S.steps[0]?.kind === 'base' ? 1 : 0; moveStep(i, to); return toast(`Schritt ${i + 1} ist jetzt Schritt ${to + 1}`); }
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
     case 'movehere': { const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true; return movePart(+el.dataset.id, S.sel); }
     case 'pickclose': { const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true; return; }
