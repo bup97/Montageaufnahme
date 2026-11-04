@@ -534,6 +534,68 @@ function bundleTool() {
   toast(`${idx.length} Schritte mit „${toolIndex().find(t => t.k === toolHL)?.name || 'Werkzeug'}“ jetzt nacheinander: Schritte ${a}–${b}. Montagereihenfolge bitte prüfen.`, 'Rückgängig', () => undo());
 }
 
+
+// ======================= Mehrere Schritte wählen (Strg/Umschalt + Klick) und gebündelt verschieben =======================
+const stepSel = new Set();       // uids
+function clickStep(i, e) {
+  const st = S.steps[i]; if (!st) return;
+  if (e.ctrlKey || e.metaKey) {
+    if (!stepSel.size && S.steps[S.sel]) stepSel.add(S.steps[S.sel].uid);
+    if (stepSel.has(st.uid)) stepSel.delete(st.uid); else stepSel.add(st.uid);
+    return markSteps();
+  }
+  if (e.shiftKey) {
+    const a = Math.min(S.sel, i), b = Math.max(S.sel, i);
+    stepSel.clear(); for (let k = a; k <= b; k++) stepSel.add(S.steps[k].uid);
+    return markSteps();
+  }
+  if (stepSel.size) { stepSel.clear(); markSteps(); }
+  select(i);
+}
+function selIdx() { return S.steps.map((s, i) => stepSel.has(s.uid) ? i : -1).filter(i => i >= 0); }
+function markSteps() {
+  [...stepSel].forEach(u => { if (!S.steps.some(s => s.uid === u)) stepSel.delete(u); });
+  $$('.cad-step', ROOT).forEach(li => li.classList.toggle('multi', stepSel.has(li.dataset.uid)));
+  const bar = ROOT && $('#cad-multibar', ROOT); if (bar) bar.outerHTML = multiBar(); else if (stepSel.size > 1) $('#cad-list', ROOT)?.insertAdjacentHTML('afterbegin', multiBar());
+}
+function multiBar() {
+  const idx = selIdx();
+  if (idx.length < 2) return '<div id="cad-multibar" hidden></div>';
+  const cut = (t) => t.length > 26 ? t.slice(0, 25) + '…' : t;
+  const baseFirst = S.steps[0]?.kind === 'base';
+  return `<div id="cad-multibar" class="cad-multibar">
+    <b>${idx.length} Schritte gewählt</b> <span class="tiny">(${idx.map(i => i + 1).join(', ')})</span>
+    <div class="row" style="gap:6px;flex-wrap:nowrap"><select id="cad-multi-to" aria-label="Verschieben nach" style="flex:1;min-width:0">
+      <option value="start">an den Anfang${baseFirst ? ' (nach dem Grundteil)' : ''}</option>
+      <option value="end">ans Ende</option>
+      <optgroup label="direkt nach Schritt …">${S.steps.map((s, i) => stepSel.has(s.uid) ? '' : `<option value="after:${s.uid}">nach ${i + 1} – ${esc(cut(s.title || ''))}</option>`).join('')}</optgroup>
+    </select><button class="btn sm primary" data-cad="multimove">Verschieben</button></div>
+    <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm" data-cad="multimerge" title="Alle Teile der gewählten Schritte in einen Schritt">Zusammenfassen</button><button class="btn sm ghost" data-cad="multiclear">Aufheben</button></div>
+    <span class="tiny muted">Strg+Klick: dazu/weg · Umschalt+Klick: Bereich · gemeinsam ziehbar</span>
+  </div>`;
+}
+// where: 'start' | 'end' | 'after:<uid>' | 'before:<uid>'
+function moveStepsTo(where) {
+  const moving = S.steps.filter(s => stepSel.has(s.uid)); if (!moving.length) return;
+  const rest = S.steps.filter(s => !stepSel.has(s.uid));
+  let at;
+  if (where === 'start') at = rest[0]?.kind === 'base' ? 1 : 0;
+  else if (where === 'end') at = rest.length;
+  else { const [k, u] = where.split(':'); const j = rest.findIndex(s => s.uid === u); if (j < 0) return; at = k === 'after' ? j + 1 : j; }
+  rest.splice(at, 0, ...moving); S.steps = rest;
+  S.sel = S.steps.indexOf(moving[0]);
+  afterChange();
+  toast(`${moving.length} Schritte verschoben → jetzt Schritte ${at + 1}–${at + moving.length}`, 'Rückgängig', () => undo());
+}
+function mergeSelected() {
+  const moving = S.steps.filter(s => stepSel.has(s.uid) && s.kind !== 'wire'); if (moving.length < 2) return toast('Verdrahtungsschritte lassen sich nicht zusammenfassen');
+  const first = moving[0];
+  moving.slice(1).forEach(s => { first.parts.push(...s.parts); s.parts = []; });
+  first.auto = true; stepSel.clear(); S.sel = S.steps.indexOf(first);
+  afterChange();
+  toast(`${moving.length} Schritte zu Schritt ${S.sel + 1} zusammengefasst`, 'Rückgängig', () => undo());
+}
+
 // ======================= Rückgängig / Wiederholen =======================
 // Nach jeder Änderung wird der Bearbeitungsstand (Schritte, Auswahl, Verdrahtung) verglichen und bei Abweichung gemerkt.
 const HIST = { undo: [], redo: [], last: null };
@@ -932,6 +994,9 @@ const STYLE = `
 .cad-list{display:flex;flex-direction:column;gap:6px;max-height:var(--cad-h, calc(100vh - 210px));overflow:auto;padding:2px}
 .cad-step{display:grid;grid-template-columns:24px 64px minmax(0,1fr) auto;gap:8px;align-items:center;background:#fff;border-radius:var(--r-s);box-shadow:var(--shadow);padding:6px;cursor:pointer;border:2px solid transparent;position:relative}
 .cad-step.sel{border-color:var(--brand)}
+.cad-multibar{position:sticky;top:0;z-index:3;background:#fff;border:2px solid var(--brand);border-radius:var(--r-s);padding:8px 10px;display:grid;gap:5px;margin-bottom:6px;box-shadow:var(--shadow)}
+.cad-multibar select{min-height:36px;font-size:13px;padding:0 6px}.cad-multibar .btn{min-height:34px}
+.cad-step.multi{background:var(--brand-soft);box-shadow:inset 4px 0 0 var(--brand),var(--shadow)}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
 .cad-toolbar select{min-height:38px;font-size:14px}
 .cad-list.tool-on .cad-step:not(.tool-hl){opacity:.38}
@@ -1147,8 +1212,8 @@ function renderWork() {
   <div style="margin-bottom:12px"><div style="font-weight:700;font-size:17px">${esc(S.meta.title)}</div><div class="tiny">${esc(S.meta.art)}${S.meta.art ? ' · ' : ''}${S.parts.length} Teile · ${S.steps.length} Schritte<span id="cad-save" class="cad-save" aria-live="polite"></span></div></div>
   ${warn.length ? `<div class="warnbox cad-work-warn" style="margin-bottom:12px">⚠ ${warn.map(esc).join('<br>⚠ ')}</div>` : ''}
   <div class="cad-work">
-    <div class="cad-list ${toolHL ? 'tool-on' : ''}" id="cad-list">${toolBar()}${S.steps.map((s, i) => { const hl = toolHL && hasTool(s, toolHL); return `
-      <div class="cad-step ${i === S.sel ? 'sel' : ''} ${hl ? 'tool-hl' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
+    <div class="cad-list ${toolHL ? 'tool-on' : ''}" id="cad-list">${multiBar()}${toolBar()}${S.steps.map((s, i) => { const hl = toolHL && hasTool(s, toolHL); return `
+      <div class="cad-step ${i === S.sel ? 'sel' : ''} ${hl ? 'tool-hl' : ''} ${stepSel.has(s.uid) ? 'multi' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
         <span class="num">${hl ? `<input type="checkbox" class="tool-chk" data-cad="toolchk" data-uid="${s.uid}" ${toolOff.has(s.uid) ? '' : 'checked'} aria-label="Schritt ${i + 1} mitbündeln">` : ''}${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
         <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${toolsOf(s).length ? `<span class="chip" title="${esc(toolsOf(s).join(', '))}">🔧 ${esc(toolsOf(s)[0].length > 14 ? toolsOf(s)[0].slice(0, 13) + '…' : toolsOf(s)[0])}</span>` : ''}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && s.dir >= 0 ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : '■ eingebaut'}</span>` : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
@@ -1303,7 +1368,7 @@ function bindList() {
   const list = $('#cad-list', ROOT); let dragFrom = null;
   list.addEventListener('dragstart', e => { const li = e.target.closest('.cad-step'); dragFrom = +li.dataset.i; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(dragFrom)); });
   list.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); $$('.cad-step.drag-over', list).forEach(x => x.classList.remove('drag-over')); e.target.closest('.cad-step')?.classList.add('drag-over'); });
-  list.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); $$('.cad-step.drag-over', list).forEach(x => x.classList.remove('drag-over')); const li = e.target.closest('.cad-step'); if (li && dragFrom !== null) moveStep(dragFrom, +li.dataset.i); dragFrom = null; });
+  list.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); $$('.cad-step.drag-over', list).forEach(x => x.classList.remove('drag-over')); const li = e.target.closest('.cad-step'); if (li && dragFrom !== null) { const from = S.steps[dragFrom]; if (from && stepSel.has(from.uid) && stepSel.size > 1) { if (!stepSel.has(li.dataset.uid)) moveStepsTo((+li.dataset.i > dragFrom ? 'after:' : 'before:') + li.dataset.uid); } else moveStep(dragFrom, +li.dataset.i); } dragFrom = null; });
 }
 function select(i) {
   if (pickMode && pickMode.mode === 'wire') pickMode = null;
@@ -1796,7 +1861,7 @@ document.addEventListener('click', e => {
   if (!ROOT || !ROOT.isConnected) return;
   const stepEl = e.target.closest('.cad-step');
   const el = e.target.closest('[data-cad]');
-  if (!el && stepEl && ROOT.contains(stepEl)) return select(+stepEl.dataset.i);
+  if (!el && stepEl && ROOT.contains(stepEl)) return clickStep(+stepEl.dataset.i, e);
   if (!el) return;
   const [a, x] = el.dataset.cad.split(':');
   switch (a) {
@@ -1818,6 +1883,9 @@ document.addEventListener('click', e => {
     case 'tostart': { const i = S.sel, to = S.steps[0]?.kind === 'base' ? 1 : 0; moveStep(i, to); return toast(`Schritt ${i + 1} ist jetzt Schritt ${to + 1}`); }
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
     case 'undo': return undo();
+    case 'multimove': return moveStepsTo($('#cad-multi-to', ROOT).value);
+    case 'multimerge': return mergeSelected();
+    case 'multiclear': stepSel.clear(); return markSteps();
     case 'toolchk': { const u = el.dataset.uid; if (el.checked) toolOff.delete(u); else toolOff.add(u); return renderWork(); }
     case 'toolbundle': return bundleTool();
     case 'redo': return redo();
@@ -1854,6 +1922,7 @@ document.addEventListener('keydown', e => {
   const inField = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
   if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'z') { e.preventDefault(); return e.shiftKey ? redo() : undo(); }
   if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'y') { e.preventDefault(); return redo(); }
+  if (e.key === 'Escape' && stepSel.size && !inField) { stepSel.clear(); return markSteps(); }
   if (e.key === 'Escape' && picked.size) { picked.clear(); applyStep(S.sel); return renderPickBox(); }
   if (inField) return;
   if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { select(S.sel + 1); e.preventDefault(); }
