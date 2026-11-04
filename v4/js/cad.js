@@ -193,7 +193,7 @@ function diagText() {
   const mem = performance.memory ? ` · JS-Speicher ${(performance.memory.usedJSHeapSize / 1048576).toFixed(0)} von ${(performance.memory.jsHeapSizeLimit / 1048576).toFixed(0)} MB` : '';
   return [
     `Montage-Recorder ${window.APP_VERSION || ''} · ${(navigator.userAgent.match(/Edg\/[\d.]+/) || navigator.userAgent.match(/Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+ Safari/))?.[0] || navigator.userAgent}`,
-    `Datei: ${f ? f.name + ' · ' + (f.size / 1048576).toFixed(1) + ' MB' : '–'} · Detailgrad: ${(DETAILS.find(d => d[0] === (L.detail || S.detail)) || [, '–'])[1]}`,
+    `Datei: ${f ? f.name + ' · ' + (f.size / 1048576).toFixed(1) + ' MB' : S.stepName ? S.stepName + ' · ' + ((S.stepSize || 0) / 1048576).toFixed(1) + ' MB (gespeichert)' : '–'} · Detailgrad: ${(DETAILS.find(d => d[0] === (L.detail || S.detail)) || [, '–'])[1]}`,
     `Teile: ${L.parts ?? '–'} · Dreiecke: ${L.tri != null ? L.tri.toLocaleString('de-DE') : '–'} · Teile ohne Dreiecke: ${L.empty ?? '–'}`,
     `Modellgröße: ${sz ? [sz.x, sz.y, sz.z].map(v => Math.round(v).toLocaleString('de-DE')).join(' × ') + ' mm · Mitte ' + [ctr.x, ctr.y, ctr.z].map(v => Math.round(v).toLocaleString('de-DE')).join(' / ') : '–'}`,
     `Schrittbilder: ${DIAG.thumbs || '–'}`,
@@ -309,8 +309,10 @@ async function analyze() {
     diag('Reihenfolge wird berechnet …');
     await runSequence();
     diag(`Reihenfolge fertig: ${S.steps.length} Schritte`);
-    S.analyzed = true; thumbs.clear();
+    S.analyzed = true; thumbs.clear(); S.workerHasParts = true;
+    S.stepName = S.stepFile.name; S.stepSize = S.stepFile.size; S.bomName = S.bomFile ? S.bomFile.name : '';
     render();
+    createSession();
   } catch (e) {
     console.error(e); clearInterval(readTimer);
     const msg = String(e.message || e);
@@ -346,6 +348,11 @@ async function runSequence() {
     return { id: p.id, label, group: groupOf(p), fastener: RX_FAST.test(label), elastic: RX_ELASTIC.test(label) && !RX_FAST.test(label) };
   });
   setPhase('prep', 0);
+  if (!S.workerHasParts) {
+    const ps = S.parts.map(p => ({ id: p.id, name: p.name, pos: p.geom.getAttribute('position').array.slice(), nrm: (p.geom.getAttribute('normal')?.array || new Float32Array(0)).slice(), idx: p.geom.getIndex().array.slice() }));
+    await call({ type: 'load', parts: ps }, null, ps.flatMap(p => [p.pos.buffer, p.nrm.buffer, p.idx.buffer]));
+    S.workerHasParts = true;
+  }
   const r = await call({ type: 'sequence', units, upAxis: S.meta.upAxis }, setPhase);
   S.contacts = new Map(S.parts.map(p => [p.id, new Set()]));
   for (const [a, b] of r.contacts) { S.contacts.get(a).add(b); S.contacts.get(b).add(a); }
@@ -358,6 +365,132 @@ async function runSequence() {
   }));
   regenTexts();
   S.sel = 0;
+}
+
+
+// ======================= Angefangene Projekte speichern / fortsetzen =======================
+// Eigene IndexedDB (unabhängig von den Anleitungen): „sessions“ = Bearbeitungsstand (klein, wird laufend gesichert),
+// „geom“ = Dreiecksnetze aller Teile als ein Blob (einmal nach dem Einlesen). So muss die STEP-Datei nicht neu gelesen werden.
+const CDB = (() => {
+  let db = null;
+  const rq = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const open = async () => db || (db = await new Promise((res, rej) => {
+    const r = indexedDB.open('FunkwerkRecorderCAD', 1);
+    r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('sessions', { keyPath: 'id' }); d.createObjectStore('geom', { keyPath: 'id' }); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const store = async (n, mode = 'readonly') => (await open()).transaction(n, mode).objectStore(n);
+  return {
+    all: async () => (await rq((await store('sessions')).getAll())).sort((a, b) => b.savedAt - a.savedAt),
+    get: async (id) => rq((await store('sessions')).get(id)),
+    put: async (rec) => rq((await store('sessions', 'readwrite')).put(rec)),
+    geom: async (id) => rq((await store('geom')).get(id)),
+    putGeom: async (rec) => rq((await store('geom', 'readwrite')).put(rec)),
+    del: async (id) => { await rq((await store('sessions', 'readwrite')).delete(id)); await rq((await store('geom', 'readwrite')).delete(id)); },
+  };
+})();
+let saveTimer = null, saveState = '';   // '' | 'saving' | 'saved' | 'error'
+function snapshot() {
+  const E = S.elec;
+  return JSON.parse(JSON.stringify({
+    meta: S.meta, bom: S.bom, match: S.match, boxVol: S.boxVol, sel: S.sel, warnings: S.warnings, loadInfo: S.loadInfo || null, detail: S.detail,
+    contacts: [...S.contacts].map(([k, v]) => [k, [...v]]),
+    steps: S.steps.map(({ _box, ...st }) => st),
+    parts: S.parts.map(p => ({ id: p.id, name: p.name })),
+    elec: E ? Object.assign({}, E, { file: E.file ? { name: E.file.name } : null, busy: false }) : null,
+  }));
+}
+async function saveNow() {
+  if (!S.analyzed || !S.sessionId) return;
+  clearTimeout(saveTimer); saveTimer = null;
+  try {
+    const old = await CDB.get(S.sessionId);
+    await CDB.put({ id: S.sessionId, created: old?.created || Date.now(), savedAt: Date.now(), takenAt: S.takenAt || old?.takenAt || null,
+      title: S.meta.title, art: S.meta.art, stepName: S.stepName || '', stepSize: S.stepSize || 0, bomName: S.bomName || '',
+      nParts: S.parts.length, nSteps: S.steps.length, state: snapshot() });
+    setSaveState('saved');
+  } catch (e) { console.error(e); setSaveState('error'); }
+}
+function scheduleSave() { if (!S.analyzed || !S.sessionId) return; setSaveState('saving'); clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 900); }
+function setSaveState(v) {
+  saveState = v; const el = ROOT && $('#cad-save', ROOT); if (!el) return;
+  el.textContent = v === 'saving' ? 'Wird gespeichert …' : v === 'error' ? '⚠ Speichern fehlgeschlagen' : v === 'saved' ? '✓ Gespeichert' : '';
+  el.classList.toggle('err', v === 'error');
+}
+// Nach dem Einlesen: neue Sitzung anlegen, Geometrie einmal sichern
+async function createSession() {
+  S.sessionId = 'c' + Date.now().toString(36) + rid(); S.takenAt = null;
+  try { navigator.storage?.persist?.(); } catch (e) {}
+  setSaveState('saving');
+  try {
+    const layout = [], chunks = [];
+    for (const p of S.parts) {
+      const pos = p.geom.getAttribute('position').array, nrm = p.geom.getAttribute('normal')?.array || new Float32Array(0), idx = p.geom.getIndex().array;
+      layout.push([pos.length, nrm.length, idx.length]); chunks.push(pos, nrm, idx);
+    }
+    await CDB.putGeom({ id: S.sessionId, layout, blob: new Blob(chunks) });
+    await saveNow();
+    diag('Projekt gespeichert (kann später unter „Angefangene Projekte“ fortgesetzt werden)');
+  } catch (e) { console.error(e); setSaveState('error'); toast('Projekt konnte nicht gespeichert werden: ' + (e.message || e)); }
+}
+async function resumeSession(id) {
+  const stop = API?.busy ? API.busy('Projekt wird geöffnet …') : () => {};
+  try {
+    const rec = await CDB.get(id), g = await CDB.geom(id);
+    if (!rec || !g) throw new Error('Gespeicherte Daten fehlen');
+    const buf = await g.blob.arrayBuffer(); let off = 0;
+    const take = (Ctor, n) => { const a = new Ctor(buf, off, n); off += n * 4; return a; };
+    const st = rec.state;
+    disposeScene(); initThree();
+    S.parts = st.parts.map((p, i) => {
+      const [np, nn, ni] = g.layout[i];
+      const pos = take(Float32Array, np), nrm = take(Float32Array, nn), idx = take(Uint32Array, ni);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      if (nn) geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3)); else geo.computeVertexNormals();
+      geo.setIndex(new THREE.BufferAttribute(idx, 1)); geo.computeBoundingBox();
+      return { id: p.id, name: p.name, clean: cleanName(p.name), geom: geo, box: geo.boundingBox.clone() };
+    });
+    Object.assign(S.meta, st.meta);
+    S.bom = st.bom; S.match = st.match || {}; S.boxVol = st.boxVol || []; S.warnings = st.warnings || []; S.loadInfo = st.loadInfo; S.detail = st.detail || 'auto';
+    S.contacts = new Map((st.contacts || []).map(([k, v]) => [k, new Set(v)]));
+    S.steps = st.steps; S.sel = Math.min(st.sel || 0, S.steps.length - 1);
+    S.elec = st.elec || null;
+    S.stepFile = null; S.bomFile = null; S.stepName = rec.stepName; S.stepSize = rec.stepSize; S.bomName = rec.bomName;
+    S.sessionId = id; S.takenAt = rec.takenAt || null; S.workerHasParts = false;
+    buildScene(); S.analyzed = true; thumbs.clear(); insTab = 'step';
+    render(); setSaveState('saved');
+  } catch (e) { console.error(e); toast('Öffnen fehlgeschlagen: ' + (e.message || e)); }
+  finally { stop(); }
+}
+// Arbeitsbereich schließen (Stand ist gespeichert) und zur Startseite
+async function closeSession() {
+  await saveNow();
+  pickMode = null; disposeScene(); clearWires?.(); arrowGroup?.clear();
+  Object.assign(S, { analyzed: false, parts: [], steps: [], sel: 0, bom: null, match: {}, contacts: new Map(), boxVol: [], warnings: [], elec: null,
+    stepFile: null, bomFile: null, sessionId: null, takenAt: null, stepName: '', stepSize: 0, bomName: '' });
+  S.meta = { title: '', art: '', upAxis: 'z', explode: true, ghost: false };
+  thumbs.clear(); render();
+}
+const fmtWhen = (t) => { const d = new Date(t), z = (n) => String(n).padStart(2, '0'); const today = new Date().toDateString() === d.toDateString();
+  return (today ? 'heute' : `${z(d.getDate())}.${z(d.getMonth() + 1)}.${d.getFullYear()}`) + `, ${z(d.getHours())}:${z(d.getMinutes())} Uhr`; };
+async function renderSessions() {
+  const box = ROOT && $('#cad-sessions', ROOT); if (!box) return;
+  let list = []; try { list = await CDB.all(); } catch (e) { box.innerHTML = ''; return; }
+  if (!list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="sect">Angefangene Projekte</div>
+    <div class="card cad-sess">${list.map(r => `<div class="cad-sess-row">
+      <div style="min-width:0"><b>${esc(r.title || r.stepName || 'Ohne Titel')}</b>${r.art ? ` <span class="tiny">${esc(r.art)}</span>` : ''}
+        <div class="tiny">${r.nSteps} Schritte · ${r.nParts} Teile · zuletzt ${fmtWhen(r.savedAt)}${r.takenAt ? ' · <span class="chip" style="font-size:11px">übernommen</span>' : ''}</div>
+        ${r.stepName ? `<div class="tiny muted">${esc(r.stepName)}</div>` : ''}</div>
+      <div class="row" style="gap:6px;flex-shrink:0"><button class="btn sm primary" data-cad="sess-open" data-id="${r.id}">Weiterarbeiten</button>
+        <button class="btn sm ghost danger" data-cad="sess-del" data-id="${r.id}" aria-label="Löschen">🗑</button></div>
+    </div>`).join('')}</div>`;
+}
+if (typeof window !== 'undefined') {
+  const flush = () => { if (saveTimer) saveNow(); };
+  window.addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 }
 
 // ======================= Texte =======================
@@ -541,6 +674,14 @@ function makeArrow(from, dir, len) {
   g.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
   return g;
 }
+// Eigene Farben für Teile im Schritt (Kontrast). Standard ist Orange; Blau bleibt dem Montagepfeil vorbehalten.
+const CONTRAST = ['#e8590c', '#2b8a3e', '#7048e8', '#f2c200', '#0c8599', '#c2255c', '#8d5524', '#495057'];
+const colMats = new Map();
+function colMat(hex) {
+  if (!hex) return null;
+  if (!colMats.has(hex)) { const c = new THREE.Color(hex); colMats.set(hex, new THREE.MeshStandardMaterial({ color: c, metalness: 0.05, roughness: 0.5, emissive: c.clone().multiplyScalar(0.18) })); }
+  return colMats.get(hex);
+}
 function applyStep(si) {
   const st = S.steps[si]; if (!st) return;
   clearWires();
@@ -550,7 +691,7 @@ function applyStep(si) {
   const baseIds = new Set(S.steps[0]?.parts || []);
   meshes.forEach((m, id) => {
     m.position.set(0, 0, 0); ghostMeshes[id].visible = false;
-    if (now.has(id)) { m.visible = true; m.material = mats.newp; if (off) { m.position.copy(off); ghostMeshes[id].visible = true; } }
+    if (now.has(id)) { m.visible = true; m.material = colMat(st.colors?.[id]) || mats.newp; if (off) { m.position.copy(off); ghostMeshes[id].visible = true; } }
     else if (placed.has(id)) { m.visible = true; m.material = baseIds.has(id) ? mats.base : mats.placed; }
     else { m.visible = S.meta.ghost; m.material = mats.ghost; }
   });
@@ -707,6 +848,9 @@ const STYLE = `
 .el-tab input[type=checkbox]{width:18px;height:18px;min-height:0}
 .el-tab tr.off td{opacity:.5}
 .chip.scan{background:#fff6bf;color:#6b5a00}
+.cad-col{width:30px;height:24px!important;min-height:0!important;padding:0!important;border:1px solid var(--line);border-radius:6px;background:none;cursor:pointer;margin-top:4px}
+.cad-save{margin-left:8px;color:#2f9e44;font-weight:600}.cad-save.err{color:var(--bad)}
+.cad-sess{padding:4px 12px}.cad-sess-row{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}.cad-sess-row:last-child{border-bottom:0}
 .wend{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 7px;font:inherit;font-size:13px;cursor:pointer;min-height:32px;white-space:nowrap}
 .wend:hover{border-color:var(--brand)}.wend.set{border-color:#2f9e44;background:#ebfbee}.wend.act{outline:2px solid var(--brand);outline-offset:1px}
 .wend-rs{border:0;background:none;cursor:pointer;color:var(--ink3);font-size:15px;padding:2px 4px;min-height:32px}
@@ -756,6 +900,11 @@ function isBlank(cv) {
 
 export function mount(root, api) {
   ROOT = root; API = api; ensureStyle(); render();
+  if (!root._cadSave) {                       // jede Änderung im Arbeitsbereich automatisch sichern
+    root._cadSave = true;
+    const kick = (e) => { if (S.analyzed && !e.target.closest?.('#cad-sessions')) setTimeout(scheduleSave, 0); };
+    ['input', 'change', 'click'].forEach(t => root.addEventListener(t, kick));
+  }
 }
 
 function render() {
@@ -791,6 +940,7 @@ function renderStart() {
     </div>
     <div class="banner" id="cad-err" hidden></div>
     ${DIAG.ev.length ? diagBlock(DIAG.failed) : ''}
+    <div id="cad-sessions"></div>
     <div class="sect">So funktioniert's</div>
     <div class="card cad-how">
       <div><b>1 · Zuordnen</b><span class="small muted">STEP-Teile werden über Art.-Nr. und Benennung den Stücklistenpositionen zugeordnet.</span></div>
@@ -810,6 +960,7 @@ function renderStart() {
   bind('cad-d-bom', 'cad-f-bom', f => { S.bomFile = f; renderStart(); });
   $('#cad-go', ROOT).addEventListener('click', analyze);
   $('#cad-detail', ROOT)?.addEventListener('change', e => { S.detail = e.target.value; });
+  renderSessions();
 }
 
 function kindChip(st) {
@@ -865,7 +1016,7 @@ function renderWork() {
   if (S.bom && st.unmatched) warn.push(st.unmatched + ' STEP-Teil(e) ohne Stücklistenposition – siehe „Zuordnung“.');
   if (S.bom && st.qtyDiff) warn.push(st.qtyDiff + ' Position(en) mit abweichender Menge zwischen Modell und Stückliste.');
   ROOT.innerHTML = `
-  <div style="margin-bottom:12px"><div style="font-weight:700;font-size:17px">${esc(S.meta.title)}</div><div class="tiny">${esc(S.meta.art)}${S.meta.art ? ' · ' : ''}${S.parts.length} Teile · ${S.steps.length} Schritte</div></div>
+  <div style="margin-bottom:12px"><div style="font-weight:700;font-size:17px">${esc(S.meta.title)}</div><div class="tiny">${esc(S.meta.art)}${S.meta.art ? ' · ' : ''}${S.parts.length} Teile · ${S.steps.length} Schritte<span id="cad-save" class="cad-save" aria-live="polite"></span></div></div>
   ${warn.length ? `<div class="warnbox cad-work-warn" style="margin-bottom:12px">⚠ ${warn.map(esc).join('<br>⚠ ')}</div>` : ''}
   <div class="cad-work">
     <div class="cad-list" id="cad-list">${S.steps.map((s, i) => `
@@ -895,7 +1046,7 @@ function renderWork() {
     </div>
   </div>
   ${diagBlock(DIAG.blank)}
-  <div class="bottom"><div class="bottom-in"><button class="btn" data-cad="restart">Andere Dateien</button><button class="btn primary" data-cad="takeover">Als Anleitung übernehmen</button></div></div>`;
+  <div class="bottom"><div class="bottom-in"><button class="btn" data-cad="close" title="Stand ist gespeichert – später unter „Angefangene Projekte“ weiterarbeiten">Schließen</button><button class="btn primary" data-cad="takeover">Als Anleitung übernehmen</button></div></div>`;
   attachViewer($('#cad-viewer', ROOT));
   renderIns(); updateHead(); showStep(S.sel);
   fitWork(); restoreScroll(keepScroll); revealSel();
@@ -934,9 +1085,10 @@ function renderIns() {
       <div class="tiny" style="margin-top:4px">${st.view ? 'Für diesen Schritt festgelegt.' : 'Folgt dem Schalter „Explosion“ (gilt für alle Schritte).'}</div>`}</div>
     <div><label class="f" for="cad-no">Wichtiger Hinweis</label><textarea id="cad-no" rows="2" placeholder="z. B. Kabel vorher durchführen, Gewinde sichern">${esc(st.note)}</textarea></div>
   </div>
-  <div class="sect">Material in diesem Schritt</div>
+  <div class="sect" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">Material in diesem Schritt
+    ${groups.length > 1 || st.colors ? `<span style="flex:1"></span><span class="row" style="gap:4px"><button class="btn sm ghost" data-cad="contrast" style="min-height:30px" title="Jede Teileart in diesem Schritt bekommt eine eigene Farbe">🎨 Kontrastfarben</button>${st.colors ? '<button class="btn sm ghost" data-cad="colreset" style="min-height:30px">↺ Standard</button>' : ''}</span>` : ''}</div>
   <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>Anz.</th><th>Bezeichnung</th><th>Schritt</th></tr></thead><tbody>
-    ${groups.map(g => g.ids.map((id, k) => `<tr>${k === 0 ? `<td rowspan="${g.ids.length}"><b>${g.ids.length}×</b></td><td rowspan="${g.ids.length}">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select></td></tr>`).join('')).join('')}
+    ${groups.map((g, gi) => g.ids.map((id, k) => `<tr>${k === 0 ? `<td rowspan="${g.ids.length}"><b>${g.ids.length}×</b><br><input type="color" class="cad-col" data-gcol="${g.ids.join(',')}" value="${st.colors?.[g.ids[0]] || CONTRAST[0]}" title="Farbe dieser Teile im Bild" aria-label="Farbe für ${esc(g.label)}"></td><td rowspan="${g.ids.length}">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select></td></tr>`).join('')).join('')}
   </tbody></table></div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap">
     <button class="btn sm" data-cad="merge" ${S.sel === 0 ? 'disabled' : ''}>Mit vorherigem zusammenfassen</button>
@@ -951,6 +1103,10 @@ function renderIns() {
   on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
   on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
   on('cad-dir', 'change', e => { st.dir = +e.target.value; st.cam = null; afterChange(); });
+  $$('input[data-gcol]', el).forEach(inp => {
+    const apply = (final) => { st.colors = st.colors || {}; inp.dataset.gcol.split(',').forEach(id => { st.colors[+id] = inp.value; }); applyStep(S.sel); if (final) { thumbs.delete(st.uid); scheduleThumbs(); renderIns(); } };
+    inp.addEventListener('input', () => apply(false)); inp.addEventListener('change', () => apply(true));
+  });
   $$('select[data-move]', el).forEach(s => s.addEventListener('change', e => { const v = e.target.value; movePart(+e.target.dataset.move, v.startsWith('new') ? v : +v); }));
 }
 // Aderende in der Tabelle: antippen = Anschluss im 3D genau setzen; 📍 = gesetzt
@@ -1512,6 +1668,8 @@ document.addEventListener('click', e => {
     case 'camauto': S.steps[S.sel].cam = null; showStep(S.sel); return scheduleThumbs();
     case 'regen': { const st = S.steps[S.sel]; st.auto = true; st.toolsEdited = false; return afterChange(); }
     case 'delstep': return deleteStep(S.sel);
+    case 'contrast': { const st = S.steps[S.sel]; st.colors = {}; stepGroups(st).forEach((g, i) => g.ids.forEach(id => { st.colors[id] = CONTRAST[i % CONTRAST.length]; })); thumbs.delete(st.uid); renderIns(); showStep(S.sel); return scheduleThumbs(); }
+    case 'colreset': { const st = S.steps[S.sel]; delete st.colors; thumbs.delete(st.uid); renderIns(); showStep(S.sel); return scheduleThumbs(); }
     case 'toend': { const i = S.sel; moveStep(i, S.steps.length - 1); return toast(`Schritt ${i + 1} ist jetzt der letzte (Schritt ${S.steps.length})`); }
     case 'tostart': { const i = S.sel, to = S.steps[0]?.kind === 'base' ? 1 : 0; moveStep(i, to); return toast(`Schritt ${i + 1} ist jetzt Schritt ${to + 1}`); }
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
@@ -1523,7 +1681,14 @@ document.addEventListener('click', e => {
     }
     case 'restart': S.analyzed = false; return render();
     case 'diagcopy': { const t = diagText(); (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => API.toast('Diagnose kopiert – bitte in den Chat einfügen'), () => { const pre = $('#cad-diag-txt', ROOT); const r = document.createRange(); r.selectNodeContents(pre); getSelection().removeAllRanges(); getSelection().addRange(r); API.toast('Text markiert – mit Strg+C kopieren'); }); return; }
-    case 'takeover': return takeOver();
+    case 'takeover': S.takenAt = Date.now(); saveNow(); return takeOver();
+    case 'close': return closeSession();
+    case 'sess-open': return resumeSession(el.dataset.id);
+    case 'sess-del': {
+      const row = el.closest('.cad-sess-row'); const name = row?.querySelector('b')?.textContent || 'Projekt'; const id = el.dataset.id;
+      if (row) row.hidden = true;               // erst nach Ablauf des Hinweises wirklich löschen – bis dahin rückgängig
+      return API.toast(`„${name}“ gelöscht`, { label: 'Rückgängig', run: () => { if (row) row.hidden = false; }, onTimeout: () => CDB.del(id).then(renderSessions) });
+    }
     case 'el-manual': { const E = elecInit(); E.res = { pages: 0, textPages: 0 }; E.conns.push({ id: rid(), a: { kind: 'term', bmk: 'X1', pin: '1' }, b: { kind: 'dev', bmk: 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); E.terminals = [...new Set([...E.terminals, 'X1'])]; E.devices = E.devices.some(d => d.bmk === 'M1') ? E.devices : [...E.devices, { bmk: 'M1', desc: 'Gerät' }]; return renderIns(); }
     case 'el-reset': { const E = elecInit(); E.res = null; E.file = null; E.conns = []; E.err = ''; pickMode = null; return renderIns(); }
     case 'el-pick': pickMode = { bmk: el.dataset.bmk, mode: 'part' }; renderIns(); return toast('Teil im 3D-Bild antippen');

@@ -500,6 +500,10 @@
       info.log = occtLog.map(l => l.n > 1 ? `${l.t}  (${l.n}×)` : l.t);
       return { result: { parts: out, rootName, info }, transfer };
     }
+    if (msg.type === 'load') {                         // gespeichertes Projekt: Geometrie für Neuberechnung übergeben
+      parts = msg.parts; preps = null;
+      return { result: { n: parts.length } };
+    }
     if (msg.type === 'sequence') {
       if (!parts) throw new Error('Keine Geometrie geladen.');
       if (!preps) {
