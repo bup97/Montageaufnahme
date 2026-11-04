@@ -494,6 +494,46 @@ if (typeof window !== 'undefined') {
 }
 
 
+
+// ======================= Schritte mit gleichem Werkzeug hervorheben / bündeln =======================
+let toolHL = '';                 // hervorgehobenes Werkzeug (normalisiert)
+const toolOff = new Set();       // hervorgehobene Schritte, die NICHT gebündelt werden sollen (uid)
+const toolKey = (t) => norm(t).replace(/\s+/g, ' ');
+function toolsOf(st) { return String(st.tools || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean); }
+function toolIndex() {
+  const m = new Map();
+  S.steps.forEach((st, i) => { for (const t of toolsOf(st)) { const k = toolKey(t); if (!k) continue; if (!m.has(k)) m.set(k, { name: t, idx: [] }); if (!m.get(k).idx.includes(i)) m.get(k).idx.push(i); } });
+  return [...m.entries()].map(([k, v]) => ({ k, ...v })).sort((a, b) => b.idx.length - a.idx.length || a.name.localeCompare(b.name, 'de'));
+}
+const hasTool = (st, k) => toolsOf(st).some(t => toolKey(t) === k);
+function toolBar() {
+  const list = toolIndex().filter(t => t.idx.length > 1);
+  if (!list.length && !toolHL) return '';
+  const cur = list.find(t => t.k === toolHL);
+  const chosen = cur ? cur.idx.filter(i => !toolOff.has(S.steps[i].uid)) : [];
+  const together = chosen.length > 1 && chosen.every((v, j) => !j || v === chosen[j - 1] + 1);
+  return `<div class="cad-toolbar">
+    <label class="tiny" for="cad-toolhl">🔧 Gleiches Werkzeug hervorheben</label>
+    <select id="cad-toolhl"><option value="">— aus —</option>${list.map(t => `<option value="${esc(t.k)}" ${t.k === toolHL ? 'selected' : ''}>${esc(t.name)} (${t.idx.length} Schritte)</option>`).join('')}</select>
+    ${cur ? `<div class="tiny" style="margin-top:4px">Schritte ${cur.idx.map(i => i + 1).join(', ')}${together ? ' – liegen bereits nacheinander' : ''}. Häkchen entfernen, um einzelne auszulassen.</div>
+      <button class="btn sm primary block" data-cad="toolbundle" style="margin-top:6px" ${chosen.length > 1 && !together ? '' : 'disabled'}>Nacheinander anordnen (${chosen.length})</button>` : ''}
+  </div>`;
+}
+// Ausgewählte Schritte hinter den ersten von ihnen rücken (Reihenfolge untereinander bleibt)
+function bundleTool() {
+  const idx = toolIndex().find(t => t.k === toolHL)?.idx.filter(i => !toolOff.has(S.steps[i].uid)) || [];
+  if (idx.length < 2) return;
+  const keepSel = S.steps[S.sel]?.uid;
+  const moving = idx.slice(1).map(i => S.steps[i]);
+  const anchor = S.steps[idx[0]];
+  S.steps = S.steps.filter(st => !moving.includes(st));
+  S.steps.splice(S.steps.indexOf(anchor) + 1, 0, ...moving);
+  S.sel = Math.max(0, S.steps.findIndex(st => st.uid === keepSel));
+  const a = S.steps.indexOf(anchor) + 1, b = a + moving.length;
+  afterChange();
+  toast(`${idx.length} Schritte mit „${toolIndex().find(t => t.k === toolHL)?.name || 'Werkzeug'}“ jetzt nacheinander: Schritte ${a}–${b}. Montagereihenfolge bitte prüfen.`, 'Rückgängig', () => undo());
+}
+
 // ======================= Rückgängig / Wiederholen =======================
 // Nach jeder Änderung wird der Bearbeitungsstand (Schritte, Auswahl, Verdrahtung) verglichen und bei Abweichung gemerkt.
 const HIST = { undo: [], redo: [], last: null };
@@ -892,6 +932,11 @@ const STYLE = `
 .cad-list{display:flex;flex-direction:column;gap:6px;max-height:var(--cad-h, calc(100vh - 210px));overflow:auto;padding:2px}
 .cad-step{display:grid;grid-template-columns:24px 64px minmax(0,1fr) auto;gap:8px;align-items:center;background:#fff;border-radius:var(--r-s);box-shadow:var(--shadow);padding:6px;cursor:pointer;border:2px solid transparent;position:relative}
 .cad-step.sel{border-color:var(--brand)}
+.cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
+.cad-toolbar select{min-height:38px;font-size:14px}
+.cad-list.tool-on .cad-step:not(.tool-hl){opacity:.38}
+.cad-step.tool-hl{background:#fff9db;box-shadow:inset 4px 0 0 #f2c200,var(--shadow)}
+.cad-step .num .tool-chk{display:block;margin:0 auto 2px;width:18px;height:18px;min-height:0;accent-color:var(--brand)}
 .cad-step.drag-over::before{content:"";position:absolute;left:6px;right:6px;top:-5px;height:3px;border-radius:2px;background:var(--brand)}
 .cad-step .num{font-weight:800;color:var(--brand);text-align:center}
 .cad-step img{width:64px;height:60px;border-radius:8px;object-fit:cover;background:#eceef1;display:block}
@@ -982,6 +1027,7 @@ function isBlank(cv) {
 
 export function mount(root, api) {
   ROOT = root; API = api; ensureStyle(); render();
+  if (!root._cadTool) { root._cadTool = true; root.addEventListener('change', e => { if (e.target.id === 'cad-toolhl') { toolHL = e.target.value; toolOff.clear(); renderWork(); } }); }
   if (!root._cadSave) {                       // jede Änderung im Arbeitsbereich automatisch sichern
     root._cadSave = true;
     const kick = (e) => { if (S.analyzed && !e.target.closest?.('#cad-sessions')) setTimeout(() => { histTrack(); scheduleSave(); }, 0); };
@@ -1101,12 +1147,12 @@ function renderWork() {
   <div style="margin-bottom:12px"><div style="font-weight:700;font-size:17px">${esc(S.meta.title)}</div><div class="tiny">${esc(S.meta.art)}${S.meta.art ? ' · ' : ''}${S.parts.length} Teile · ${S.steps.length} Schritte<span id="cad-save" class="cad-save" aria-live="polite"></span></div></div>
   ${warn.length ? `<div class="warnbox cad-work-warn" style="margin-bottom:12px">⚠ ${warn.map(esc).join('<br>⚠ ')}</div>` : ''}
   <div class="cad-work">
-    <div class="cad-list" id="cad-list">${S.steps.map((s, i) => `
-      <div class="cad-step ${i === S.sel ? 'sel' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
-        <span class="num">${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
-        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && s.dir >= 0 ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : '■ eingebaut'}</span>` : ''}</div></div>
+    <div class="cad-list ${toolHL ? 'tool-on' : ''}" id="cad-list">${toolBar()}${S.steps.map((s, i) => { const hl = toolHL && hasTool(s, toolHL); return `
+      <div class="cad-step ${i === S.sel ? 'sel' : ''} ${hl ? 'tool-hl' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
+        <span class="num">${hl ? `<input type="checkbox" class="tool-chk" data-cad="toolchk" data-uid="${s.uid}" ${toolOff.has(s.uid) ? '' : 'checked'} aria-label="Schritt ${i + 1} mitbündeln">` : ''}${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
+        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${toolsOf(s).length ? `<span class="chip" title="${esc(toolsOf(s).join(', '))}">🔧 ${esc(toolsOf(s)[0].length > 14 ? toolsOf(s)[0].slice(0, 13) + '…' : toolsOf(s)[0])}</span>` : ''}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && s.dir >= 0 ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : '■ eingebaut'}</span>` : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
-      </div>`).join('')}</div>
+      </div>`; }).join('')}</div>
     <div class="banner" id="cad-gpu" ${gpuLost ? '' : 'hidden'} style="grid-column:1/-1">Der Grafikspeicher reicht für dieses Modell nicht – Bilder und 3D-Ansicht bleiben leer. Bitte „Andere Dateien“ wählen, Detailgrad <b>„Grob“</b> einstellen und die Analyse erneut starten.</div>
     <div class="cad-viewer" id="cad-viewer">
       <div class="cad-vtop">
@@ -1185,6 +1231,7 @@ function renderIns() {
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
   on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
   on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
+  on('cad-to', 'change', () => renderWork());   // Werkzeug-Chips und Hervorhebung auffrischen
   on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
   on('cad-dir', 'change', e => { st.dir = +e.target.value; st.cam = null; afterChange(); });
   $$('input[data-gcol]', el).forEach(inp => {
@@ -1220,6 +1267,7 @@ function renderWireIns(el, st) {
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
   on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
   on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
+  on('cad-to', 'change', () => renderWork());   // Werkzeug-Chips und Hervorhebung auffrischen
   on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
 }
 function renderMap(el) {
@@ -1770,6 +1818,8 @@ document.addEventListener('click', e => {
     case 'tostart': { const i = S.sel, to = S.steps[0]?.kind === 'base' ? 1 : 0; moveStep(i, to); return toast(`Schritt ${i + 1} ist jetzt Schritt ${to + 1}`); }
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
     case 'undo': return undo();
+    case 'toolchk': { const u = el.dataset.uid; if (el.checked) toolOff.delete(u); else toolOff.add(u); return renderWork(); }
+    case 'toolbundle': return bundleTool();
     case 'redo': return redo();
     case 'pickmove': { const v = $('#cad-pick-to', ROOT).value; const ids = [...picked]; picked.clear(); return movePartsTo(ids, v.startsWith('new') ? v : +v); }
     case 'pickclose': picked.clear(); applyStep(S.sel); return renderPickBox();
