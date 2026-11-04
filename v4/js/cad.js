@@ -405,7 +405,7 @@ async function saveNow() {
   clearTimeout(saveTimer); saveTimer = null;
   try {
     const old = await CDB.get(S.sessionId);
-    await CDB.put({ id: S.sessionId, created: old?.created || Date.now(), savedAt: Date.now(), takenAt: S.takenAt || old?.takenAt || null,
+    await CDB.put({ id: S.sessionId, created: old?.created || Date.now(), savedAt: Date.now(), takenAt: S.takenAt || old?.takenAt || null, projectId: S.projectId || old?.projectId || null,
       title: S.meta.title, art: S.meta.art, stepName: S.stepName || '', stepSize: S.stepSize || 0, bomName: S.bomName || '',
       nParts: S.parts.length, nSteps: S.steps.length, state: snapshot() });
     setSaveState('saved');
@@ -419,7 +419,7 @@ function setSaveState(v) {
 }
 // Nach dem Einlesen: neue Sitzung anlegen, Geometrie einmal sichern
 async function createSession() {
-  S.sessionId = 'c' + Date.now().toString(36) + rid(); S.takenAt = null;
+  S.sessionId = 'c' + Date.now().toString(36) + rid(); S.takenAt = null; S.projectId = null;
   try { navigator.storage?.persist?.(); } catch (e) {}
   setSaveState('saving');
   try {
@@ -457,7 +457,7 @@ async function resumeSession(id) {
     S.steps = st.steps; S.sel = Math.min(st.sel || 0, S.steps.length - 1);
     S.elec = st.elec || null;
     S.stepFile = null; S.bomFile = null; S.stepName = rec.stepName; S.stepSize = rec.stepSize; S.bomName = rec.bomName;
-    S.sessionId = id; S.takenAt = rec.takenAt || null; S.workerHasParts = false;
+    S.sessionId = id; S.takenAt = rec.takenAt || null; S.projectId = rec.projectId || null; S.workerHasParts = false;
     buildScene(); S.analyzed = true; thumbs.clear(); insTab = 'step';
     render(); histReset(); setSaveState('saved');
   } catch (e) { console.error(e); toast('Öffnen fehlgeschlagen: ' + (e.message || e)); }
@@ -468,7 +468,7 @@ async function closeSession() {
   await saveNow();
   pickMode = null; disposeScene(); clearWires?.(); arrowGroup?.clear();
   Object.assign(S, { analyzed: false, parts: [], steps: [], sel: 0, bom: null, match: {}, contacts: new Map(), boxVol: [], warnings: [], elec: null,
-    stepFile: null, bomFile: null, sessionId: null, takenAt: null, stepName: '', stepSize: 0, bomName: '' });
+    stepFile: null, bomFile: null, sessionId: null, takenAt: null, projectId: null, stepName: '', stepSize: 0, bomName: '' });
   S.meta = { title: '', art: '', upAxis: 'z', explode: true, ghost: false };
   thumbs.clear(); picked.clear(); histReset(); render();
 }
@@ -1695,7 +1695,18 @@ function previewBmk(b) {
 
 // ======================= Übernahme in den Recorder =======================
 async function takeOver() {
-  const info = await API.projectForm({ area: 'funkwerk', type: 'vormontage', customer: '', product: S.meta.title, variant: S.meta.art }, 'Als Montageanleitung anlegen', 'Anlegen');
+  let target = null;
+  const linked = S.projectId && API.getProject ? await API.getProject(S.projectId) : null;
+  if (linked) {
+    const name = [linked.product, linked.variant].filter(Boolean).join(' ') || 'Anleitung';
+    const pick = await new Promise(res => API.menu([
+      { icon: '🔄', label: `„${name}“ aktualisieren (Schritte werden ersetzt)`, run: () => res('update') },
+      { icon: '＋', label: 'Als neue Anleitung anlegen', run: () => res('new') },
+    ]).then(() => res(null)));
+    if (!pick) return;
+    if (pick === 'update') target = linked.id;
+  }
+  const info = target ? {} : await API.projectForm({ area: 'funkwerk', type: 'vormontage', customer: '', product: S.meta.title, variant: S.meta.art }, 'Als Montageanleitung anlegen', 'Anlegen');
   if (!info) return;
   const stop = API.busy('Bilder werden erzeugt…');
   try {
@@ -1725,7 +1736,9 @@ async function takeOver() {
       });
     }
     applyStep(S.sel);
-    await API.createFromCad(info, steps);
+    S.takenAt = Date.now();
+    S.projectId = target ? await API.updateFromCad(target, steps, S.sessionId) : await API.createFromCad(Object.assign({}, info, { cadSession: S.sessionId }), steps);
+    await saveNow();
   } catch (e) { console.error(e); toast('Übernahme fehlgeschlagen: ' + e.message); }
   finally { stop(); }
 }
@@ -1766,7 +1779,7 @@ document.addEventListener('click', e => {
     }
     case 'restart': S.analyzed = false; return render();
     case 'diagcopy': { const t = diagText(); (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => API.toast('Diagnose kopiert – bitte in den Chat einfügen'), () => { const pre = $('#cad-diag-txt', ROOT); const r = document.createRange(); r.selectNodeContents(pre); getSelection().removeAllRanges(); getSelection().addRange(r); API.toast('Text markiert – mit Strg+C kopieren'); }); return; }
-    case 'takeover': S.takenAt = Date.now(); saveNow(); return takeOver();
+    case 'takeover': return takeOver();
     case 'close': return closeSession();
     case 'sess-open': return resumeSession(el.dataset.id);
     case 'sess-del': {
@@ -1797,4 +1810,11 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { select(S.sel - 1); e.preventDefault(); }
 });
 
+// Aus einer Anleitung zurück in die 3D-Bearbeitung
+export async function openSession(id) {
+  if (S.analyzed && S.sessionId === id) { render(); return; }
+  if (!(await CDB.get(id))) return toast('Der 3D-Bearbeitungsstand dieser Anleitung ist nicht mehr vorhanden (gelöscht oder anderer Browser/PC).');
+  if (S.analyzed) await closeSession();
+  return resumeSession(id);
+}
 export function isReady() { return S.analyzed; }

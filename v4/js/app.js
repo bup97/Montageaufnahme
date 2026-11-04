@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.5.1';
+const VERSION = '5.5.2';
 window.APP_VERSION = VERSION;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -214,16 +214,17 @@ async function renderCad() {
   try {
     if (!cadModule) cadModule = await import('./cad.js');
     if (S.route.view !== 'cad') return;
-    cadModule.mount($('#cad-root'), { toast, busy, projectForm: async (v, title, cta) => { S.projects = await DB.allProjects(); return projectForm(v, title, cta); }, createFromCad });
+    cadModule.mount($('#cad-root'), { toast, busy, menu, projectForm: async (v, title, cta) => { S.projects = await DB.allProjects(); return projectForm(v, title, cta); }, createFromCad, updateFromCad,
+      getProject: (id) => DB.getProject(id) });
+    if (S.pendingCad) { const id = S.pendingCad; S.pendingCad = null; cadModule.openSession(id); }
   } catch (e) {
     console.error(e);
     $('#cad-root').innerHTML = `<div class="banner">Der CAD-Reiter konnte nicht geladen werden (${esc(e.message)}). Beim ersten Öffnen wird eine Internetverbindung benötigt.</div>`;
   }
 }
 /* Ergebnis aus dem CAD-Reiter als normale Anleitung anlegen */
-async function createFromCad(info, cadSteps) {
-  const now = Date.now();
-  const p = { id: uid(), ...info, createdAt: now, updatedAt: now, createdAtText: new Date(now).toLocaleString('de-DE'), steps: [], v: 4, source: 'cad' };
+async function cadStepsToRecorder(p, cadSteps) {
+  const out = [];
   for (const c of cadSteps) {
     const s = emptyStep();
     s.title = c.title || '';
@@ -238,12 +239,32 @@ async function createFromCad(info, cadSteps) {
       const rec = { id: uid(), projectId: p.id, blob: c.image.blob, thumb: th.blob, w: c.image.w, h: c.image.h, createdAt: new Date().toISOString() };
       await DB.putPhoto(rec); s.photoIds.push(rec.id);
     }
-    p.steps.push(s);
+    out.push(s);
   }
+  return out;
+}
+async function createFromCad(info, cadSteps) {
+  const now = Date.now();
+  const p = { id: uid(), ...info, createdAt: now, updatedAt: now, createdAtText: new Date(now).toLocaleString('de-DE'), steps: [], v: 4, source: 'cad' };
+  p.steps = await cadStepsToRecorder(p, cadSteps);
   await DB.putProject(p);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   toast('Anleitung angelegt: ' + p.steps.length + ' Schritte');
   go(`#/p/${p.id}`);
+  return p.id;
+}
+/* Erneut aus dem 3D übernommen: Schritte der bestehenden Anleitung ersetzen (Kopfdaten bleiben) */
+async function updateFromCad(id, cadSteps, cadSession) {
+  const p = await DB.getProject(id); if (!p) throw new Error('Anleitung nicht gefunden');
+  const old = await DB.photoIdsOf(id);
+  p.steps = await cadStepsToRecorder(p, cadSteps);
+  if (old.length) await DB.deletePhotos(old);
+  p.cadSession = cadSession || p.cadSession; p.updatedAt = Date.now();
+  await DB.putProject(p);
+  if (S.P && S.P.id === id) S.P = p;
+  toast('Anleitung aktualisiert: ' + p.steps.length + ' Schritte');
+  go(`#/p/${p.id}`);
+  return p.id;
 }
 async function renderHome() {
   S.projects = (await DB.allProjects()).filter(p => !p.hidden && !S.pending.has(p.id)).sort((a, b) => b.updatedAt - a.updatedAt);
@@ -390,6 +411,7 @@ function renderProject() {
     <button class="icon-btn" data-act="pmenu" data-id="${p.id}" aria-label="Mehr">⋯</button>
   </div></header>
   <main class="wrap">
+    ${p.cadSession ? `<div class="banner info row" style="margin-bottom:12px;justify-content:space-between;gap:10px;flex-wrap:wrap"><span>🧊 Aus dem 3D-Modell erstellt – Reihenfolge, Teile und Bilder dort anpassen und erneut übernehmen.</span><button class="btn sm primary" data-act="cad-edit">3D-Bearbeitung öffnen</button></div>` : ''}
     ${totalWarn ? `<div class="warnbox" style="margin-bottom:12px">⚠ ${totalWarn} Folie${totalWarn > 1 ? 'n' : ''} bitte prüfen – Schritt öffnen oder „Folien ansehen“.</div>` : ''}
     ${isDesk() ? projectGrid(p, labels) : `
     <div class="steps">
@@ -924,6 +946,7 @@ document.addEventListener('click', async e => {
     case 'home': return go('#/');
     case 'nav-home': return go('#/');
     case 'nav-cad': return go('#/cad');
+    case 'cad-edit': S.pendingCad = S.P.cadSession; return go('#/cad');
     case 'back-project': case 'done': return go(`#/p/${S.P.id}`);
     case 'step': return go(`#/p/${S.P.id}/s/${id}/material`);
     case 'up': return moveStep(id, -1);
