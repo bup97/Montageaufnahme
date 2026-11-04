@@ -311,7 +311,7 @@ async function analyze() {
     diag(`Reihenfolge fertig: ${S.steps.length} Schritte`);
     S.analyzed = true; thumbs.clear(); S.workerHasParts = true;
     S.stepName = S.stepFile.name; S.stepSize = S.stepFile.size; S.bomName = S.bomFile ? S.bomFile.name : '';
-    render();
+    render(); histReset();
     createSession();
   } catch (e) {
     console.error(e); clearInterval(readTimer);
@@ -459,7 +459,7 @@ async function resumeSession(id) {
     S.stepFile = null; S.bomFile = null; S.stepName = rec.stepName; S.stepSize = rec.stepSize; S.bomName = rec.bomName;
     S.sessionId = id; S.takenAt = rec.takenAt || null; S.workerHasParts = false;
     buildScene(); S.analyzed = true; thumbs.clear(); insTab = 'step';
-    render(); setSaveState('saved');
+    render(); histReset(); setSaveState('saved');
   } catch (e) { console.error(e); toast('Öffnen fehlgeschlagen: ' + (e.message || e)); }
   finally { stop(); }
 }
@@ -470,7 +470,7 @@ async function closeSession() {
   Object.assign(S, { analyzed: false, parts: [], steps: [], sel: 0, bom: null, match: {}, contacts: new Map(), boxVol: [], warnings: [], elec: null,
     stepFile: null, bomFile: null, sessionId: null, takenAt: null, stepName: '', stepSize: 0, bomName: '' });
   S.meta = { title: '', art: '', upAxis: 'z', explode: true, ghost: false };
-  thumbs.clear(); render();
+  thumbs.clear(); picked.clear(); histReset(); render();
 }
 const fmtWhen = (t) => { const d = new Date(t), z = (n) => String(n).padStart(2, '0'); const today = new Date().toDateString() === d.toDateString();
   return (today ? 'heute' : `${z(d.getDate())}.${z(d.getMonth() + 1)}.${d.getFullYear()}`) + `, ${z(d.getHours())}:${z(d.getMinutes())} Uhr`; };
@@ -491,6 +491,43 @@ if (typeof window !== 'undefined') {
   const flush = () => { if (saveTimer) saveNow(); };
   window.addEventListener('pagehide', flush);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+}
+
+
+// ======================= Rückgängig / Wiederholen =======================
+// Nach jeder Änderung wird der Bearbeitungsstand (Schritte, Auswahl, Verdrahtung) verglichen und bei Abweichung gemerkt.
+const HIST = { undo: [], redo: [], last: null };
+function histState() {
+  const E = S.elec;
+  return JSON.stringify({ steps: S.steps.map(({ _box, ...st }) => st), sel: S.sel, meta: { explode: S.meta.explode, upAxis: S.meta.upAxis },
+    elec: E ? { conns: E.conns, map: E.map } : null });
+}
+function histReset() { HIST.undo = []; HIST.redo = []; HIST.last = S.analyzed ? histState() : null; updateUndoBtns(); }
+function histTrack() {
+  if (!S.analyzed) return;
+  const now = histState(); if (HIST.last === null) { HIST.last = now; return; }
+  if (now === HIST.last) return;
+  // nur die Auswahl gewechselt? kein eigener Rückgängig-Schritt
+  const strip = (j) => j.replace(/"sel":\d+,/, '');
+  if (strip(now) === strip(HIST.last)) { HIST.last = now; return; }
+  HIST.undo.push(HIST.last); if (HIST.undo.length > 60) HIST.undo.shift();
+  HIST.redo = []; HIST.last = now; updateUndoBtns();
+}
+function histApply(json) {
+  const st = JSON.parse(json);
+  const before = new Map(S.steps.map(x => [x.uid, JSON.stringify(Object.assign({}, x, { _box: undefined }))]));
+  S.steps = st.steps; S.sel = Math.min(st.sel, S.steps.length - 1);
+  Object.assign(S.meta, st.meta);
+  if (st.elec) { const E = elecInit(); E.conns = st.elec.conns; E.map = st.elec.map; }
+  S.steps.forEach(x => { if (before.get(x.uid) !== JSON.stringify(Object.assign({}, x, { _box: undefined }))) thumbs.delete(x.uid); });
+  HIST.last = json; pickMode = null; picked.clear();
+  renderWork(); scheduleThumbs(); scheduleSave(); updateUndoBtns();
+}
+function undo() { histTrack(); if (!HIST.undo.length) return toast('Nichts zum Rückgängigmachen'); HIST.redo.push(HIST.last); histApply(HIST.undo.pop()); toast('Rückgängig gemacht'); }
+function redo() { if (!HIST.redo.length) return; HIST.undo.push(HIST.last); histApply(HIST.redo.pop()); toast('Wiederhergestellt'); }
+function updateUndoBtns() {
+  const u = ROOT && $('[data-cad="undo"]', ROOT), r = ROOT && $('[data-cad="redo"]', ROOT);
+  if (u) u.disabled = !HIST.undo.length; if (r) r.disabled = !HIST.redo.length;
 }
 
 // ======================= Texte =======================
@@ -602,6 +639,7 @@ function initThree() {
     ghost: new THREE.MeshBasicMaterial({ color: 0x8a96a3, transparent: true, opacity: 0.08, depthWrite: false }),
     src: new THREE.MeshStandardMaterial({ color: 0x2f9e44, metalness: 0.05, roughness: 0.5, emissive: 0x0b2a12 }),
     dst: new THREE.MeshStandardMaterial({ color: 0x1971c2, metalness: 0.05, roughness: 0.5, emissive: 0x061a33 }),
+    pick: new THREE.MeshStandardMaterial({ color: 0xffd43b, metalness: 0.05, roughness: 0.45, emissive: 0x5c4a00 }),
     dim: new THREE.MeshStandardMaterial({ color: 0xc9cfd6, metalness: 0.1, roughness: 0.7, transparent: true, opacity: 0.55, depthWrite: false }),
   };
   arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ARROW), roughness: 0.45, emissive: 0x06223f });
@@ -682,10 +720,12 @@ function colMat(hex) {
   if (!colMats.has(hex)) { const c = new THREE.Color(hex); colMats.set(hex, new THREE.MeshStandardMaterial({ color: c, metalness: 0.05, roughness: 0.5, emissive: c.clone().multiplyScalar(0.18) })); }
   return colMats.get(hex);
 }
+let offscreen = false;      // beim Erzeugen von Bildern keine Auswahl-Hervorhebung
+function markPicked() { if (offscreen) return; picked.forEach(id => { const m = meshes[id]; if (m) { m.visible = true; m.material = mats.pick; } }); }
 function applyStep(si) {
   const st = S.steps[si]; if (!st) return;
   clearWires();
-  if (st.kind === 'wire') { arrowGroup.clear(); st._box = applyWireStep(st); needRender = true; return; }
+  if (st.kind === 'wire') { arrowGroup.clear(); st._box = applyWireStep(st); markPicked(); needRender = true; return; }
   const placed = placedBefore(si); const now = new Set(st.parts);
   const off = explodeOffset(si);
   const baseIds = new Set(S.steps[0]?.parts || []);
@@ -703,6 +743,7 @@ function applyStep(si) {
     arrowGroup.add(makeArrow(c.clone().add(off.clone().multiplyScalar(0.92)), off.clone().normalize().negate(), len * 0.8));
   }
   needRender = true;
+  markPicked();
 }
 function autoCam(si, cam, aspect) {
   const st = S.steps[si];
@@ -740,7 +781,7 @@ function renderTo(si, w, h, bg) {
   renderer.setPixelRatio(1); renderer.setSize(w, h, false);
   renderer.setClearColor(new THREE.Color(bg || VIEWER_BG));
   offCamera.aspect = w / h; offCamera.updateProjectionMatrix();
-  applyStep(si);
+  offscreen = true; try { applyStep(si); } finally { offscreen = false; }
   setCam(offCamera, camFor(si, offCamera, w / h));
   renderer.render(scene, offCamera);
   ctx.drawImage(renderer.domElement, 0, 0, w, h);          // sofort abgreifen, solange der Puffer gefüllt ist
@@ -779,14 +820,54 @@ function onPick(e) {
     toast(shortBmk(b) + (pickMode.mode === 'marker' ? ': Position gesetzt' : ' → ' + labelOf(S.parts[hit.object.userData.id])));
     pickMode = null; updateUse(); regenTexts(); renderIns(); showStep(S.sel); thumbs.clear(); scheduleThumbs(); return;
   }
-  const box = $('#cad-pick', ROOT); if (!box) return;
-  if (!hit) { box.hidden = true; return; }
-  const id = hit.object.userData.id; const p = S.parts[id]; const b = bomOf(p);
-  const si = S.steps.findIndex(s => s.parts.includes(id));
-  box.innerHTML = `<b>${esc(labelOf(p))}</b>
-    <span class="tiny">${b ? 'Pos. ' + esc(b.pos) + ' · ' + esc(b.art) : 'nicht in der Stückliste zugeordnet'} · montiert in Schritt ${si + 1}</span>
-    <div class="row" style="margin-top:6px">${si !== S.sel ? `<button class="btn sm primary" data-cad="movehere" data-id="${id}">In Schritt ${S.sel + 1} verschieben</button>` : ''}<button class="btn sm ghost" data-cad="pickclose">Schließen</button></div>`;
+  // Teile im 3D anwählen: Klick = auswählen, Strg/Umschalt + Klick = zur Auswahl hinzufügen/entfernen
+  if (!hit) { if (picked.size) { picked.clear(); applyStep(S.sel); } return renderPickBox(); }
+  const id = hit.object.userData.id;
+  if (e.ctrlKey || e.metaKey || e.shiftKey) { if (picked.has(id)) picked.delete(id); else picked.add(id); }
+  else if (picked.size === 1 && picked.has(id)) picked.clear();
+  else { picked.clear(); picked.add(id); }
+  applyStep(S.sel); renderPickBox();
+}
+const picked = new Set();
+function renderPickBox() {
+  const box = ROOT && $('#cad-pick', ROOT); if (!box) return;
+  [...picked].forEach(id => { if (!S.parts[id]) picked.delete(id); });
+  if (!picked.size) { box.hidden = true; box.innerHTML = ''; return; }
+  const ids = [...picked], cur = S.steps[S.sel];
+  const where = (id) => { const i = S.steps.findIndex(s => s.parts.includes(id)); return i >= 0 ? 'Schritt ' + (i + 1) : 'nicht verbaut'; };
+  const head = ids.length === 1
+    ? (() => { const p = S.parts[ids[0]], b = bomOf(p); return `<b>${esc(labelOf(p))}</b><span class="tiny">${b ? 'Pos. ' + esc(b.pos) + ' · ' + esc(b.art) : 'nicht in der Stückliste zugeordnet'} · ${where(ids[0])}</span>`; })()
+    : `<b>${ids.length} Teile ausgewählt</b><span class="tiny">${esc([...new Set(ids.map(id => labelOf(S.parts[id])))].slice(0, 4).join(', '))}${ids.length > 4 ? ' …' : ''}</span>`;
+  const cut = (t) => t.length > 28 ? t.slice(0, 27) + '…' : t;
+  const curOk = cur && cur.kind !== 'wire' && !ids.every(id => cur.parts.includes(id));   // schon hier? dann „neuer Schritt“ vorschlagen
+  box.innerHTML = `${head}
+    <label class="tiny" for="cad-pick-to" style="margin-top:6px">Verschieben nach</label>
+    <select id="cad-pick-to">
+      ${curOk ? `<option value="${S.sel}">Schritt ${S.sel + 1} (aktuell angezeigt)</option>` : ''}
+      <optgroup label="Als neuen Schritt"><option value="new:after">→ neuer Schritt nach ${S.sel + 1}</option><option value="new:before">→ neuer Schritt vor ${S.sel + 1}</option><option value="new:end">→ neuer Schritt ganz am Ende</option></optgroup>
+      <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
+    </select>
+    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button></div>
+    <span class="tiny muted">Strg + Klick: weitere Teile dazu</span>`;
   box.hidden = false;
+}
+// Mehrere Teile auf einmal verschieben; der angezeigte Schritt bleibt gewählt
+function movePartsTo(ids, to) {
+  const cur = S.steps[S.sel];
+  const fromOf = (id) => S.steps.find(st => st.parts.includes(id));
+  let target;
+  if (typeof to === 'string') {
+    const first = fromOf(ids[0]) || cur;
+    const at = to === 'new:end' ? S.steps.length : S.sel + (to === 'new:before' ? 0 : 1);
+    target = { uid: rid(), parts: [], dir: first?.kind === 'wire' ? -1 : (first?.dir ?? -1), kind: ids.every(id => RX_FAST.test(labelOf(S.parts[id]))) ? 'fast' : 'part', title: '', text: '', note: '', tools: '', auto: true, cam: null };
+    S.steps.splice(at, 0, target);
+  } else { target = S.steps[to]; if (!target || target.kind === 'wire') return; }
+  for (const id of ids) { const f = fromOf(id); if (f === target) continue; if (f) f.parts = f.parts.filter(x => x !== id); target.parts.push(id); }
+  const keep = cur && cur.parts.length ? cur : target;
+  afterChange();
+  S.sel = Math.max(0, S.steps.indexOf(keep)); refreshSel();
+  const n = S.steps.indexOf(target) + 1;
+  toast(`${ids.length === 1 ? '„' + labelOf(S.parts[ids[0]]) + '“' : ids.length + ' Teile'} → Schritt ${n}`, 'Anzeigen', () => select(n - 1));
 }
 
 // ======================= Oberfläche =======================
@@ -827,6 +908,7 @@ const STYLE = `
 .cad-vtitle .k{font-size:12px;font-weight:700;color:var(--brand);text-transform:uppercase;letter-spacing:.04em}
 .cad-vtitle .h{font-weight:700}
 .cad-tools{display:flex;gap:4px;background:rgba(255,255,255,.94);border-radius:10px;padding:4px;box-shadow:var(--shadow);flex-wrap:wrap}
+.cad-tg:disabled{opacity:.35;cursor:default}
 .cad-tg{border:0;background:transparent;border-radius:7px;padding:6px 10px;font-size:13px;font-weight:600;color:var(--ink2);min-height:34px}
 .cad-tg[aria-pressed="true"]{background:var(--brand-soft);color:var(--brand)}
 .cad-nav{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:flex;gap:6px;align-items:center;background:rgba(255,255,255,.95);border-radius:999px;padding:4px;box-shadow:var(--shadow)}
@@ -834,7 +916,7 @@ const STYLE = `
 .cad-nav span{min-width:64px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
 .cad-legend{position:absolute;left:10px;bottom:14px;font-size:12px;color:var(--ink2);background:rgba(255,255,255,.88);border-radius:8px;padding:4px 8px}
 .cad-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 8px;vertical-align:-1px}
-.cad-pick{position:absolute;right:10px;bottom:62px;max-width:300px;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px}
+.cad-pick{position:absolute;right:10px;bottom:62px;max-width:320px;z-index:4;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px}
 .cad-ptab{width:100%;border-collapse:collapse;font-size:13px}
 .cad-ptab td,.cad-ptab th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .cad-ptab th{font-size:11.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.04em}
@@ -902,7 +984,7 @@ export function mount(root, api) {
   ROOT = root; API = api; ensureStyle(); render();
   if (!root._cadSave) {                       // jede Änderung im Arbeitsbereich automatisch sichern
     root._cadSave = true;
-    const kick = (e) => { if (S.analyzed && !e.target.closest?.('#cad-sessions')) setTimeout(scheduleSave, 0); };
+    const kick = (e) => { if (S.analyzed && !e.target.closest?.('#cad-sessions')) setTimeout(() => { histTrack(); scheduleSave(); }, 0); };
     ['input', 'change', 'click'].forEach(t => root.addEventListener(t, kick));
   }
 }
@@ -1034,6 +1116,8 @@ function renderWork() {
           <button class="cad-tg" data-cad="ghost" aria-pressed="${S.meta.ghost}">Folgeteile</button>
           <button class="cad-tg" data-cad="camsave">Ansicht merken</button>
           <button class="cad-tg" data-cad="camauto">Auto</button>
+          <button class="cad-tg" data-cad="undo" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" style="font-size:18px" ${HIST.undo.length ? '' : 'disabled'}>↶</button>
+          <button class="cad-tg" data-cad="redo" title="Wiederholen (Strg+Y)" aria-label="Wiederholen" style="font-size:18px" ${HIST.redo.length ? '' : 'disabled'}>↷</button>
         </div>
       </div>
       <div class="cad-legend"><i style="background:${ACCENT}"></i>neu im Schritt<i style="background:#a9b1ba"></i>bereits montiert<i style="background:${ARROW}"></i>Montagerichtung</div>
@@ -1176,11 +1260,10 @@ function bindList() {
 function select(i) {
   if (pickMode && pickMode.mode === 'wire') pickMode = null;
   S.sel = Math.max(0, Math.min(S.steps.length - 1, i));
-  const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true;
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
   revealSel();
   if (insTab !== 'step') insTab = 'step';
-  renderInsTabs(); renderIns(); updateHead(); showStep(S.sel);
+  renderInsTabs(); renderIns(); updateHead(); showStep(S.sel); renderPickBox();
 }
 function renderInsTabs() { $$('.cad-ins .seg button', ROOT).forEach(b => b.classList.toggle('on', b.dataset.cad === 'ins:' + insTab)); }
 function moveStep(from, to) {
@@ -1238,7 +1321,7 @@ function movePart(id, to) {
 function afterChange() {
   S.steps = S.steps.filter(s => s.parts.length || (s.kind === 'wire' && wiresOf(s).length));
   S.sel = Math.max(0, Math.min(S.sel, S.steps.length - 1));
-  regenTexts(); renderWork(); scheduleThumbs();
+  regenTexts(); renderWork(); scheduleThumbs(); histTrack();
 }
 
 // ======================= Elektro (V5): Schaltplan → Verdrahtungsschritte =======================
@@ -1673,11 +1756,13 @@ document.addEventListener('click', e => {
     case 'toend': { const i = S.sel; moveStep(i, S.steps.length - 1); return toast(`Schritt ${i + 1} ist jetzt der letzte (Schritt ${S.steps.length})`); }
     case 'tostart': { const i = S.sel, to = S.steps[0]?.kind === 'base' ? 1 : 0; moveStep(i, to); return toast(`Schritt ${i + 1} ist jetzt Schritt ${to + 1}`); }
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
-    case 'movehere': { const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true; return movePart(+el.dataset.id, S.sel); }
-    case 'pickclose': { const pk = $('#cad-pick', ROOT); if (pk) pk.hidden = true; return; }
+    case 'undo': return undo();
+    case 'redo': return redo();
+    case 'pickmove': { const v = $('#cad-pick-to', ROOT).value; const ids = [...picked]; picked.clear(); return movePartsTo(ids, v.startsWith('new') ? v : +v); }
+    case 'pickclose': picked.clear(); applyStep(S.sel); return renderPickBox();
     case 'reseq': {
       el.disabled = true; el.textContent = 'Berechne …';
-      return runSequence().then(() => { thumbs.clear(); insTab = 'step'; renderWork(); toast('Reihenfolge neu berechnet'); }).catch(err => toast(err.message));
+      return runSequence().then(() => { thumbs.clear(); insTab = 'step'; renderWork(); histTrack(); toast('Reihenfolge neu berechnet'); }).catch(err => toast(err.message));
     }
     case 'restart': S.analyzed = false; return render();
     case 'diagcopy': { const t = diagText(); (navigator.clipboard?.writeText(t) || Promise.reject()).then(() => API.toast('Diagnose kopiert – bitte in den Chat einfügen'), () => { const pre = $('#cad-diag-txt', ROOT); const r = document.createRange(); r.selectNodeContents(pre); getSelection().removeAllRanges(); getSelection().addRange(r); API.toast('Text markiert – mit Strg+C kopieren'); }); return; }
@@ -1702,7 +1787,12 @@ document.addEventListener('click', e => {
   }
 });
 document.addEventListener('keydown', e => {
-  if (!ROOT?.isConnected || !S.analyzed || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
+  if (!ROOT?.isConnected || !S.analyzed) return;
+  const inField = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
+  if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'z') { e.preventDefault(); return e.shiftKey ? redo() : undo(); }
+  if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'y') { e.preventDefault(); return redo(); }
+  if (e.key === 'Escape' && picked.size) { picked.clear(); applyStep(S.sel); return renderPickBox(); }
+  if (inField) return;
   if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { select(S.sel + 1); e.preventDefault(); }
   if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { select(S.sel - 1); e.preventDefault(); }
 });
