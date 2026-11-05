@@ -2021,8 +2021,8 @@ function applyWireStep(st) {
       const tip = start.clone().add(dir.clone().multiplyScalar(stubLen));
       const bend = start.clone().add(out.clone().multiplyScalar(stubLen * 0.55));
       const curve = new THREE.QuadraticBezierCurve3(start, bend, tip);
-      wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0022, 10, false), mat));
-      const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0028, 12, 8), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
+      wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0009, 8, false), mat));
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0014, 10, 6), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
       // unsichtbare, größere Greiffläche: Aderende mit der Maus verschieben
       const grip = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.02, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
       grip.position.copy(start); grip.userData = { conn: c.id, side: sideKey }; wireGroup.add(grip); wireGrips.push(grip);
