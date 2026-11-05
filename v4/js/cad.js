@@ -1866,7 +1866,7 @@ function applyWireStep(st) {
   const up = S.meta.upAxis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
   const srcIds = new Set(), dstIds = new Set(); const box = new THREE.Box3();
   const endsBmk = new Set(ws.flatMap(c => [c.a, c.b]).filter(e => e.kind !== 'ext').map(e => e.bmk));
-  for (const b of endsBmk) { const m = E.map[b]; if (m && m.type === 'part') (isDev(b) ? srcIds : dstIds).add(...m.ids); }
+  for (const b of endsBmk) { const m = E.map[b]; if (m && m.type === 'part') m.ids.forEach(id => (isDev(b) ? srcIds : dstIds).add(id)); }   // ganzer Block farbig
   meshes.forEach((m, id) => {
     m.position.set(0, 0, 0); ghostMeshes[id].visible = false; m.visible = true;
     m.material = srcIds.has(id) ? mats.src : dstIds.has(id) ? mats.dst : (!offscreen && S.meta.wireFocus !== false ? mats.faint : mats.dim);
