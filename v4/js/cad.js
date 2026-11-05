@@ -1084,9 +1084,9 @@ const STYLE = `
 .cad-step.multi{background:var(--brand-soft);box-shadow:inset 4px 0 0 var(--brand),var(--shadow)}
 .cad-ptab tr.mat-off td{opacity:.45}.cad-ptab tr.mat-off td:first-child{opacity:1}.mat-vis{width:18px;height:18px;min-height:0;accent-color:var(--brand)}
 .el-block{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}.el-block .chip button{border:0;background:none;cursor:pointer;margin-left:2px;padding:0 2px;font-size:14px;color:var(--ink3)}
-.cad-frame{position:absolute;pointer-events:none;z-index:1;border:2px dashed rgba(149,36,86,.85);box-shadow:0 0 0 9999px rgba(30,34,40,.22);border-radius:2px}
+.cad-frame{position:absolute;pointer-events:none;z-index:1;border:1px dashed rgba(60,66,76,.35);box-shadow:0 0 0 9999px rgba(30,34,40,.07)}
 .cad-viewer{overflow:hidden}
-.cad-frame span{position:absolute;left:6px;top:6px;font:600 11px/1 system-ui,sans-serif;color:#fff;background:rgba(149,36,86,.85);padding:3px 6px;border-radius:4px}
+.cad-frame span{position:absolute;right:6px;bottom:6px;font:500 10px/1 system-ui,sans-serif;color:rgba(60,66,76,.6);letter-spacing:.02em}
 .cad-sublist{display:grid;gap:4px;max-height:220px;overflow:auto;padding-left:26px}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
 .cad-toolbar select{min-height:38px;font-size:14px}
