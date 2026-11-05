@@ -961,6 +961,13 @@ function onPick(e) {
       pickMode = next; thumbs.delete(S.steps[S.sel]?.uid); renderIns(); showStep(S.sel); scheduleThumbs(); return;
     }
     const E = elecInit(); const b = pickMode.bmk;
+    if (pickMode.mode === 'partadd') {
+      const id = hit.object.userData.id; const m = E.map[b] && E.map[b].type === 'part' ? E.map[b] : (E.map[b] = { type: 'part', ids: [] });
+      if (m.ids.includes(id)) m.ids = m.ids.filter(x => x !== id); else m.ids.push(id);
+      if (!m.ids.length) delete E.map[b];
+      toast(`${shortBmk(b)}: ${m.ids.length} Teil${m.ids.length === 1 ? '' : 'e'}`);
+      updateUse(); regenTexts(); renderIns(); previewBmk(b); thumbs.clear(); scheduleThumbs(); return;
+    }
     if (pickMode.mode === 'marker') E.map[b] = { type: 'marker', p: hit.point.toArray() };
     else E.map[b] = { type: 'part', ids: [hit.object.userData.id] };
     toast(shortBmk(b) + (pickMode.mode === 'marker' ? ': Position gesetzt' : ' → ' + labelOf(S.parts[hit.object.userData.id])));
@@ -1042,6 +1049,7 @@ const STYLE = `
 .cad-multibar{position:sticky;top:0;z-index:3;background:#fff;border:2px solid var(--brand);border-radius:var(--r-s);padding:8px 10px;display:grid;gap:5px;margin-bottom:6px;box-shadow:var(--shadow)}
 .cad-multibar select{min-height:36px;font-size:13px;padding:0 6px}.cad-multibar .btn{min-height:34px}
 .cad-step.multi{background:var(--brand-soft);box-shadow:inset 4px 0 0 var(--brand),var(--shadow)}
+.el-block{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}.el-block .chip button{border:0;background:none;cursor:pointer;margin-left:2px;padding:0 2px;font-size:14px;color:var(--ink3)}
 .cad-sublist{display:grid;gap:4px;max-height:220px;overflow:auto;padding-left:26px}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
 .cad-toolbar select{min-height:38px;font-size:14px}
@@ -1541,6 +1549,16 @@ let wireGroup = null;
 function elecInit() { if (!S.elec) S.elec = { file: null, res: null, conns: [], devices: [], terminals: [], map: {}, busy: false, err: '' }; return S.elec; }
 const isDev = (b) => elecInit().devices.some(d => d.bmk === b);
 const descOf = (b) => (elecInit().devices.find(d => d.bmk === b) || {}).desc || '';
+// Klemmenblock: alle gleichartigen Teile, die sich (über Nachbarn) berühren – z. B. aneinandergereihte Reihenklemmen
+function blockChain(ids) {
+  const key = (id) => norm(S.parts[id]?.clean || S.parts[id]?.name || '');
+  const keys = new Set(ids.map(key)), seen = new Set(ids), queue = ids.slice();
+  while (queue.length) {
+    const id = queue.shift();
+    for (const nb of S.contacts.get(id) || []) if (!seen.has(nb) && keys.has(key(nb))) { seen.add(nb); queue.push(nb); }
+  }
+  return [...seen];
+}
 function devPartIds(b) { const m = elecInit().map[b]; return m && m.type === 'part' ? m.ids : []; }
 
 async function loadSchematic(file) {
@@ -1924,7 +1942,9 @@ function renderElec(el) {
     const st = m ? '<span class="chip" style="background:var(--ok-soft);color:var(--ok)">✓</span>' : '<span class="chip">–</span>';
     return `<tr><td><b>${esc(shortBmk(b))}</b><div class="tiny">${esc(kind === 'dev' ? (d.desc || 'Gerät') + (d.group ? ' · ' + d.group : '') : 'Klemmleiste')}</div></td>
       <td><select data-elmap="${esc(b)}" aria-label="3D-Teil für ${esc(b)}">${partOpts(m)}</select>
-      <div class="row" style="gap:4px;margin-top:4px"><button class="btn sm ghost" data-cad="el-pick" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">im 3D wählen</button>${kind === 'term' ? `<button class="btn sm ghost" data-cad="el-mark" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">📍 Position setzen</button>` : ''}</div></td><td>${st}</td></tr>`;
+      ${m && m.type === 'part' && m.ids.length > 1 ? `<div class="el-block"><span class="tiny"><b>Block aus ${m.ids.length} Teilen:</b></span>${m.ids.map(id => `<span class="chip">${esc(labelOf(S.parts[id]) || 'Teil')}<button data-cad="el-rmpart" data-bmk="${esc(b)}" data-id="${id}" aria-label="Aus dem Block entfernen">×</button></span>`).join('')}</div>` : ''}
+      ${(() => { const ch = m && m.type === 'part' && m.ids.length ? blockChain(m.ids) : []; return ch.length > m?.ids?.length ? `<button class="btn sm" data-cad="el-chain" data-bmk="${esc(b)}" style="min-height:30px;margin-top:4px">⛓ ganzer Block: ${ch.length} gleiche Teile nebeneinander</button>` : ''; })()}
+      <div class="row" style="gap:4px;margin-top:4px;flex-wrap:wrap"><button class="btn sm ghost" data-cad="el-pick" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">im 3D wählen</button>${m && m.type === 'part' ? `<button class="btn sm ghost" data-cad="el-pickadd" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">＋ weitere im 3D</button>` : ''}${kind === 'term' ? `<button class="btn sm ghost" data-cad="el-mark" data-bmk="${esc(b)}" style="min-height:28px;padding:0 6px">📍 Position setzen</button>` : ''}</div></td><td>${st}</td></tr>`;
   };
   const used = E.conns.filter(c => c.use).length;
   const relevantDevs = E.devices.filter(d => E.map[d.bmk] || E.conns.some(c => c.use && [c.a, c.b].some(e => e.bmk === d.bmk))).sort((a, b) => natCmp(shortBmk(a.bmk), shortBmk(b.bmk)));
@@ -1940,7 +1960,8 @@ function renderElec(el) {
     <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:6px"><div><b>${esc(E.file ? E.file.name : 'Manuelle Eingabe')}</b><div class="tiny">${E.res.pages || 0} Seiten · ${E.conns.length} Verbindungen · ${E.devices.length} Geräte · ${E.terminals.length} Klemmleisten</div></div>
       <button class="btn sm ghost" data-cad="el-reset">Anderes PDF</button></div>
     ${E.err ? `<div class="warnbox">⚠ ${esc(E.err)}</div>` : ''}
-    ${pickMode && pickMode.mode !== 'wire' ? `<div class="banner info"><b>${pickMode.mode === 'marker' ? 'Position für ' : 'Teil für '}${esc(shortBmk(pickMode.bmk))}</b> jetzt im 3D-Bild antippen. <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
+    ${pickMode && pickMode.mode === 'partadd' ? `<div class="banner info"><b>Teile für ${esc(shortBmk(pickMode.bmk))}</b> im 3D-Bild antippen – jedes angetippte Teil kommt dazu, nochmal antippen nimmt es wieder heraus (${(E.map[pickMode.bmk]?.ids || []).length} gewählt). <button class="btn sm primary" data-cad="el-pickcancel">Fertig</button></div>` :
+      pickMode && pickMode.mode !== 'wire' ? `<div class="banner info"><b>${pickMode.mode === 'marker' ? 'Position für ' : 'Teil für '}${esc(shortBmk(pickMode.bmk))}</b> jetzt im 3D-Bild antippen. <button class="btn sm ghost" data-cad="el-pickcancel">Abbrechen</button></div>` : ''}
   </div>
   <div class="sect">Geräte und Klemmen im 3D-Modell</div>
   <div class="card" style="padding:8px 12px"><table class="cad-maptab"><colgroup><col style="width:34%"><col><col style="width:40px"></colgroup><tbody>
@@ -1962,7 +1983,8 @@ function renderElec(el) {
   const more = $('#el-more', el); if (more) more.addEventListener('toggle', () => { elMoreOpen = more.open; });
   $$('select[data-elmap]', el).forEach(s => s.addEventListener('change', e => {
     const b = e.target.dataset.elmap, v = e.target.value;
-    if (v === '') delete E.map[b]; else if (v !== 'marker') E.map[b] = { type: 'part', ids: [+v] };
+    if (v === '') delete E.map[b];
+    else if (v !== 'marker') { const old = E.map[b]; E.map[b] = { type: 'part', ids: old && old.type === 'part' && old.ids.length > 1 ? [+v, ...old.ids.slice(1).filter(x => x !== +v)] : [+v] }; }
     updateUse(); renderIns(); previewBmk(b);
   }));
   $$('input[data-eluse]', el).forEach(i => i.addEventListener('change', e => { const c = E.conns.find(x => x.id === e.target.dataset.eluse); c.use = e.target.checked; c.userSet = true; renderIns(); }));
@@ -1979,10 +2001,11 @@ function renderElec(el) {
 // Vorschau: zugeordnetes Teil kurz grün zeigen
 function previewBmk(b) {
   const ids = elecInit().map[b]?.ids || [];
-  if (!ids.length) return;
+  if (!ids.length && !(pickMode && pickMode.mode === 'partadd')) return;
   meshes.forEach((m, id) => { m.visible = true; m.position.set(0, 0, 0); ghostMeshes[id].visible = false; m.material = ids.includes(id) ? mats.src : mats.dim; });
   arrowGroup.clear(); clearWires(); needRender = true;
-  clearTimeout(previewBmk.t); previewBmk.t = setTimeout(() => showStep(S.sel), 1800);
+  clearTimeout(previewBmk.t);
+  if (!(pickMode && pickMode.mode === 'partadd')) previewBmk.t = setTimeout(() => showStep(S.sel), 1800);   // beim Sammeln bleibt alles sichtbar
 }
 
 // ======================= Übernahme in den Recorder =======================
@@ -2087,8 +2110,11 @@ document.addEventListener('click', e => {
     case 'el-manual': { const E = elecInit(); E.res = { pages: 0, textPages: 0 }; E.conns.push({ id: rid(), a: { kind: 'term', bmk: 'X1', pin: '1' }, b: { kind: 'dev', bmk: 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); E.terminals = [...new Set([...E.terminals, 'X1'])]; E.devices = E.devices.some(d => d.bmk === 'M1') ? E.devices : [...E.devices, { bmk: 'M1', desc: 'Gerät' }]; return renderIns(); }
     case 'el-reset': { const E = elecInit(); E.res = null; E.file = null; E.conns = []; E.err = ''; pickMode = null; return renderIns(); }
     case 'el-pick': pickMode = { bmk: el.dataset.bmk, mode: 'part' }; renderIns(); return toast('Teil im 3D-Bild antippen');
+    case 'el-pickadd': pickMode = { bmk: el.dataset.bmk, mode: 'partadd' }; renderIns(); previewBmk(el.dataset.bmk); return toast('Weitere Teile im 3D-Bild antippen');
+    case 'el-chain': { const E = elecInit(), b = el.dataset.bmk, m = E.map[b]; if (!m || m.type !== 'part') return; m.ids = blockChain(m.ids); updateUse(); regenTexts(); renderIns(); previewBmk(b); thumbs.clear(); scheduleThumbs(); return toast(`${shortBmk(b)}: Block aus ${m.ids.length} Teilen zugewiesen`); }
+    case 'el-rmpart': { const E = elecInit(), b = el.dataset.bmk, m = E.map[b]; if (!m) return; m.ids = m.ids.filter(x => x !== +el.dataset.id); if (!m.ids.length) delete E.map[b]; updateUse(); renderIns(); previewBmk(b); thumbs.clear(); return scheduleThumbs(); }
     case 'el-mark': pickMode = { bmk: el.dataset.bmk, mode: 'marker' }; renderIns(); return toast('Stelle im 3D-Bild antippen, an der die Klemme sitzt');
-    case 'el-pickcancel': pickMode = null; return renderIns();
+    case 'el-pickcancel': pickMode = null; showStep(S.sel); return renderIns();
     case 'el-add': { const E = elecInit(); E.conns.unshift({ id: rid(), a: { kind: 'term', bmk: E.terminals[0] || 'X1', pin: '1' }, b: { kind: 'dev', bmk: (E.devices[0] || {}).bmk || 'M1', pin: '+' }, color: '', cs: '', use: true, userSet: true, manual: true }); return renderIns(); }
     case 'el-build': return buildWireSteps();
     case 'wire-pos': pickMode = { mode: 'wire', conn: el.dataset.id, side: el.dataset.side, chain: el.dataset.side === 'a' }; renderIns(); return toast('Anschlussstelle im 3D-Bild antippen');
