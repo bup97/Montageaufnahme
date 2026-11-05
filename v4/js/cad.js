@@ -963,6 +963,7 @@ function renderTo(si, w, h, bg) {
   if (S.steps[si]?.kind === 'wire') { if (hoverDot) hoverDot.visible = false; layoutWireLabels(offCamera); }
   renderer.render(scene, offCamera);
   ctx.drawImage(renderer.domElement, 0, 0, w, h);          // sofort abgreifen, solange der Puffer gefüllt ist
+  try { drawLoupes(ctx, w, h, S.steps[si], offCamera, bg || VIEWER_BG); } catch (e) { console.warn('Lupen', e); }
   renderer.setPixelRatio(prevPR); renderer.setSize(Math.max(1, prev.x), Math.max(1, prev.y), false);
   renderer.setClearColor(new THREE.Color(VIEWER_BG)); needRender = true;
   return out;
@@ -1422,10 +1423,28 @@ function renderWireIns(el, st) {
     ${ws.map(c => `<tr class="${pickMode && pickMode.conn === c.id ? 'wpick' : ''}"><td>${endBtn(c, 'a')}</td><td>${endBtn(c, 'b')}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap"><button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''}>⤒ An den Anfang</button><button class="btn sm" data-cad="toend" ${S.sel === S.steps.length - 1 ? 'disabled' : ''}>⤓ Ans Ende</button><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
+  <div class="sect">Lupen im Folienbild</div>
+  <div class="card stack">
+    <label class="row" style="gap:8px;cursor:pointer"><input type="checkbox" id="cad-loupe" ${st.loupes !== false ? 'checked' : ''} style="width:18px;height:18px;min-height:0"> 🔍 Aderenden vergrößert zeigen</label>
+    ${st.loupes !== false ? `<div class="row" style="gap:8px;flex-wrap:wrap">
+      <label class="tiny" for="cad-lz">Vergrößerung</label><select id="cad-lz" style="width:auto;min-height:34px">${[2, 3, 4, 6, 8, 12].map(z => `<option value="${z}" ${(st.loupeZoom || 4) === z ? 'selected' : ''}>${z}×</option>`).join('')}</select>
+      <label class="tiny" for="cad-ls">Größe</label><select id="cad-ls" style="width:auto;min-height:34px">${[['0.24', 'klein'], ['0.3', 'mittel'], ['0.38', 'groß']].map(([v, t]) => `<option value="${v}" ${String(st.loupeSize || 0.3) === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+    <img id="cad-lprev" alt="Vorschau Folienbild" style="width:100%;border-radius:8px;border:1px solid var(--line);background:#fff;min-height:120px">
+    <div class="tiny">Vorschau des Folienbilds. Nah beieinanderliegende Enden teilen sich eine Lupe (höchstens 4). Lupen sitzen dort, wo im Bild am wenigsten Modell ist. Den Bildausschnitt bestimmt „Ansicht merken“.</div>` : ''}
+  </div>
   <label class="row tiny" style="gap:8px;margin-top:8px;cursor:pointer"><input type="checkbox" id="cad-wfocus" ${S.meta.wireFocus !== false ? 'checked' : ''} style="width:18px;height:18px;min-height:0"> Übrige Teile beim Bearbeiten ausblenden (Folienbild zeigt sie weiterhin)</label>
   <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb). Aderenden lassen sich im 3D-Bild mit der Maus an die richtige Stelle ziehen – sie rasten nur auf dem zugeordneten Gerät bzw. der Klemme ein. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
   on('cad-wfocus', 'change', e => { S.meta.wireFocus = e.target.checked; applyStep(S.sel); needRender = true; });
+  const loupeChanged = () => { thumbs.delete(st.uid); scheduleThumbs(); renderIns(); };
+  on('cad-loupe', 'change', e => { st.loupes = e.target.checked; loupeChanged(); });
+  $('#cad-lz', el)?.addEventListener('change', e => { st.loupeZoom = +e.target.value; loupeChanged(); });
+  $('#cad-ls', el)?.addEventListener('change', e => { st.loupeSize = +e.target.value; loupeChanged(); });
+  if ($('#cad-lprev', el)) {                       // Vorschau etwas verzögert, damit schnelle Änderungen nicht jedes Mal neu zeichnen
+    clearTimeout(renderWireIns.t);
+    renderWireIns.t = setTimeout(() => { const im = $('#cad-lprev', ROOT); if (!im || S.steps[S.sel] !== st) return;
+      try { const cv = renderTo(S.sel, 640, 600, '#ffffff'); applyStep(S.sel); im.src = cv.toDataURL('image/jpeg', 0.85); } catch (e) { console.warn(e); } }, 250);
+  }
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
   on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
   on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
@@ -1755,8 +1774,93 @@ function clearWires() {
 }
 // Szene für einen Verdrahtungsschritt; liefert die Box der beteiligten Punkte
 
+
+// ======================= Lupen im Folienbild (Verdrahtung) =======================
+// Je Aderende (nahe beieinander liegende Enden gemeinsam) eine runde Vergrößerung aus derselben Blickrichtung,
+// dazu ein Kreis um die Stelle im Gesamtbild und eine Verbindungslinie.
+function drawLoupes(ctx, w, h, st, cam, bg) {
+  if (st.kind !== 'wire' || st.loupes === false || !wireEnds.length || w < 380) return;
+  const Z = st.loupeZoom || 4, L = Math.round(Math.min(w, h) * (st.loupeSize || 0.3)), R = L / 2, rSrc = R / Z;
+  // Enden im Bild
+  const pts = wireEnds.map(e => { const v = e.p.clone().project(cam); return Object.assign({}, e, { x: (v.x + 1) / 2 * w, y: (1 - v.y) / 2 * h, inView: Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1 && v.z < 1 }); }).filter(e => e.inView);
+  if (!pts.length) return;
+  // Enden bündeln, die in eine Lupe passen
+  const clusters = [];
+  for (const e of pts) {
+    const c = clusters.find(c => Math.hypot(c.x - e.x, c.y - e.y) < rSrc * 0.75);
+    if (c) { c.items.push(e); c.x = c.items.reduce((s, i) => s + i.x, 0) / c.items.length; c.y = c.items.reduce((s, i) => s + i.y, 0) / c.items.length; }
+    else clusters.push({ x: e.x, y: e.y, items: [e] });
+  }
+  clusters.sort((a, b) => b.items.length - a.items.length);
+  const use = clusters.slice(0, 4);
+  // Wie viel „Modell“ liegt an einer Stelle? (Bildpunkte, die nicht Hintergrund sind)
+  const bgc = new THREE.Color(bg); const br = bgc.r * 255, bgG = bgc.g * 255, bb = bgc.b * 255;
+  const img = ctx.getImageData(0, 0, w, h).data;
+  const busy = (cx, cy) => { let n = 0, t = 0; for (let i = -6; i <= 6; i++) for (let j = -6; j <= 6; j++) { if (i * i + j * j > 36) continue; const x = Math.round(cx + i * R / 6), y = Math.round(cy + j * R / 6); if (x < 0 || y < 0 || x >= w || y >= h) continue; t++; const k = (y * w + x) * 4; if (Math.abs(img[k] - br) + Math.abs(img[k + 1] - bgG) + Math.abs(img[k + 2] - bb) > 24) n++; } return t ? n / t : 1; };
+  const m = R + Math.round(Math.min(w, h) * 0.025);
+  const cands = [[m, m], [w - m, m], [m, h - m], [w - m, h - m], [m, h / 2], [w - m, h / 2], [w / 2, m], [w / 2, h - m]];
+  // Beschriftungsschilder im Bild (ungefähr: Rechteck über dem Aderende) – Lupen sollen sie nicht verdecken
+  const P = cam.projectionMatrix.elements;
+  const tags = wireLabels.map(Lb => { const v = Lb.anchor.clone().project(cam); const tw = Lb.sp.scale.x * P[0] / 2 * w, th = Lb.sp.scale.y * P[5] / 2 * h;
+    const cx = (v.x + 1) / 2 * w + (0.5 - Lb.sp.center.x) * tw, cy = (1 - v.y) / 2 * h - (0.5 - Lb.sp.center.y) * th; return { x0: cx - tw / 2, x1: cx + tw / 2, y0: cy - th / 2, y1: cy + th / 2 }; });
+  const hitsTag = (x, y, r) => tags.some(t => { const nx = Math.max(t.x0, Math.min(x, t.x1)), ny = Math.max(t.y0, Math.min(y, t.y1)); return Math.hypot(nx - x, ny - y) < r; });
+  const placed = [];
+  for (const c of use) {
+    let best = null, bs = Infinity;
+    for (const [x, y] of cands) {
+      if (placed.some(p => Math.hypot(p.x - x, p.y - y) < L * 1.04)) continue;
+      if (hitsTag(x, y, R * 1.08)) continue;
+      if (use.some(o => Math.hypot(o.x - x, o.y - y) < R + rSrc)) continue;          // keine Stelle verdecken, die gezeigt werden soll
+      const sc = busy(x, y) * 3 + Math.hypot(c.x - x, c.y - y) / Math.max(w, h);
+      if (sc < bs) { bs = sc; best = { x, y }; }
+    }
+    if (!best) continue;
+    placed.push(Object.assign(best, { c }));
+  }
+  if (!placed.length) return;
+  // Nahaufnahmen rendern (Beschriftungsschilder ausblenden – die Lupe bekommt eine eigene Unterschrift)
+  const hidden = []; wireLabels.forEach(Lb => { hidden.push([Lb.sp, Lb.sp.visible], [Lb.line, Lb.line.visible]); Lb.sp.visible = false; Lb.line.visible = false; });
+  const fwd = new THREE.Vector3(); cam.getWorldDirection(fwd);
+  renderer.setSize(L, L, false);
+  const shots = placed.map(pl => {
+    const tgt = new THREE.Vector3(pl.c.x / w * 2 - 1, -(pl.c.y / h * 2 - 1), 0.5).unproject(cam);
+    // Punkt auf Höhe der Aderenden (Tiefe des nächsten Endes)
+    const depth = Math.min(...pl.c.items.map(i => i.p.clone().sub(cam.position).dot(fwd)));
+    const ray = tgt.clone().sub(cam.position).normalize(); const t = depth / Math.max(1e-6, ray.dot(fwd)); const focus = cam.position.clone().add(ray.multiplyScalar(t));
+    const c2 = cam.clone(); c2.aspect = 1;   // gleicher Standpunkt, engerer Bildwinkel → Z-fach vergrößert
+    c2.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2) * (L / h) / Z));
+    c2.position.copy(cam.position); c2.up.copy(cam.up); c2.lookAt(focus); c2.near = Math.max(cam.near, depth * 0.05); c2.far = cam.far; c2.updateProjectionMatrix();
+    renderer.render(scene, c2);
+    const cv = document.createElement('canvas'); cv.width = L; cv.height = L; cv.getContext('2d').drawImage(renderer.domElement, 0, 0, L, L);
+    return cv;
+  });
+  hidden.forEach(([o, v]) => { o.visible = v; });
+  // zeichnen: Linie, Kreis um die Stelle, Lupe, Unterschrift
+  const ring = Math.max(2, Math.round(L / 90)), font = Math.round(L * 0.075);
+  placed.forEach((pl, i) => {
+    const { c } = pl, col = c.items.some(x => x.dev) && !c.items.some(x => !x.dev) ? SRC_COL : DST_COL;
+    const dx = pl.x - c.x, dy = pl.y - c.y, d = Math.hypot(dx, dy) || 1;
+    ctx.save();
+    ctx.strokeStyle = col; ctx.lineWidth = ring; ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.moveTo(c.x + dx / d * rSrc, c.y + dy / d * rSrc); ctx.lineTo(pl.x - dx / d * R, pl.y - dy / d * R); ctx.stroke();
+    ctx.beginPath(); ctx.arc(c.x, c.y, rSrc, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.shadowColor = 'rgba(0,0,0,.25)'; ctx.shadowBlur = ring * 4;
+    ctx.beginPath(); ctx.arc(pl.x, pl.y, R, 0, Math.PI * 2); ctx.fillStyle = bg; ctx.fill(); ctx.shadowBlur = 0;
+    ctx.save(); ctx.beginPath(); ctx.arc(pl.x, pl.y, R - ring / 2, 0, Math.PI * 2); ctx.clip(); ctx.drawImage(shots[i], pl.x - R, pl.y - R, L, L); ctx.restore();
+    ctx.lineWidth = ring * 1.6; ctx.beginPath(); ctx.arc(pl.x, pl.y, R, 0, Math.PI * 2); ctx.stroke();
+    // Unterschrift
+    const txt = [...new Set(c.items.map(x => x.text))].join(' · ');
+    ctx.font = `600 ${font}px Calibri, Carlito, Arial, sans-serif`; const tw = Math.min(L * 1.1, ctx.measureText(txt).width) + font;
+    const ty = pl.y + R - font * 0.6; ctx.fillStyle = col; ctx.beginPath();
+    const rx = pl.x - tw / 2, rh = font * 1.45; ctx.roundRect ? ctx.roundRect(rx, ty - rh / 2, tw, rh, rh / 2) : ctx.rect(rx, ty - rh / 2, tw, rh); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, pl.x, ty, L * 1.1);
+    ctx.restore();
+  });
+}
+
 // ---------- Beschriftungen der Verdrahtung ohne Überlappung anordnen (im Bildraum, je Kamera) ----------
-const wireLabels = [], wireGrips = [], wireStubs = [];
+const wireLabels = [], wireGrips = [], wireStubs = [], wireEnds = [];
 function layoutWireLabels(cam) {
   if (!wireLabels.length) return;
   cam.updateMatrixWorld(); cam.updateProjectionMatrix();
@@ -1860,7 +1964,7 @@ let suppressPick = false;
 
 function applyWireStep(st) {
   if (!wireGroup) { wireGroup = new THREE.Group(); scene.add(wireGroup); }
-  clearWires(); wireLabels.length = 0; wireGrips.length = 0; wireStubs.length = 0;
+  clearWires(); wireLabels.length = 0; wireGrips.length = 0; wireStubs.length = 0; wireEnds.length = 0;
   const E = elecInit(); const ws = wiresOf(st);
   const diag = modelBox.getSize(new THREE.Vector3()).length(); const center = modelBox.getCenter(new THREE.Vector3());
   const up = S.meta.upAxis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
@@ -1923,6 +2027,7 @@ function applyWireStep(st) {
       const grip = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.02, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
       grip.position.copy(start); grip.userData = { conn: c.id, side: sideKey }; wireGroup.add(grip); wireGrips.push(grip);
       box.expandByPoint(start); box.expandByPoint(tip); tips.push(tip); wireStubs.push([start.clone(), bend.clone(), tip.clone()]);
+      { const eo = sideKey === 'a' ? c.a : c.b; wireEnds.push({ p: start.clone(), text: short(eo), dev: isDev(eo.bmk), col: adern(c) }); }
     }
     if (!a && tips[1]) pa = tips[1].clone().add(up.clone().multiplyScalar(diag * 0.02));   // Ziel außerhalb: Hinweis am Aderende
     if (!b && tips[0]) pb = tips[0].clone().add(up.clone().multiplyScalar(diag * 0.02));
