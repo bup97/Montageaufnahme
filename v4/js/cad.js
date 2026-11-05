@@ -739,6 +739,7 @@ function initThree() {
     newp: new THREE.MeshStandardMaterial({ color: 0xe8590c, metalness: 0.05, roughness: 0.5, emissive: 0x3a1200 }),
     newGhost: new THREE.MeshBasicMaterial({ color: 0xe8590c, transparent: true, opacity: 0.18, depthWrite: false }),
     ghost: new THREE.MeshBasicMaterial({ color: 0x8a96a3, transparent: true, opacity: 0.08, depthWrite: false }),
+    faint: new THREE.MeshBasicMaterial({ color: 0xaab3bd, transparent: true, opacity: 0.07, depthWrite: false }),
     src: new THREE.MeshStandardMaterial({ color: 0x2f9e44, metalness: 0.05, roughness: 0.5, emissive: 0x0b2a12 }),
     dst: new THREE.MeshStandardMaterial({ color: 0x1971c2, metalness: 0.05, roughness: 0.5, emissive: 0x061a33 }),
     pick: new THREE.MeshStandardMaterial({ color: 0xffd43b, metalness: 0.05, roughness: 0.45, emissive: 0x5c4a00 }),
@@ -910,7 +911,7 @@ function onPick(e) {
   const r = renderer.domElement.getBoundingClientRect();
   const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
   const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
-  const hit = rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.ghost), false)[0];
+  const hit = rc.intersectObjects(pickMode && pickMode.mode === 'wire' ? endTargets(pickMode.conn, pickMode.side) : meshes.filter(m => m.visible && m.material !== mats.ghost && m.material !== mats.faint), false)[0];
   if (pickMode) {
     if (!hit) return;
     if (pickMode.mode === 'wire') {             // Aderende genau setzen: Punkt + Flächenrichtung
@@ -1333,8 +1334,10 @@ function renderWireIns(el, st) {
     ${ws.map(c => `<tr class="${pickMode && pickMode.conn === c.id ? 'wpick' : ''}"><td>${endBtn(c, 'a')}</td><td>${endBtn(c, 'b')}</td><td>${esc(adern(c) || '–')}</td><td><button class="x" data-cad="wire-rm" data-id="${c.id}" aria-label="Aus Schritt entfernen" style="width:30px;height:30px">×</button></td></tr>`).join('')}
   </tbody></table></div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap"><button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''}>⤒ An den Anfang</button><button class="btn sm" data-cad="toend" ${S.sel === S.steps.length - 1 ? 'disabled' : ''}>⤓ Ans Ende</button><button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button></div>
-  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb). Aderenden lassen sich im 3D-Bild mit der Maus an die richtige Stelle ziehen. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
+  <label class="row tiny" style="gap:8px;margin-top:8px;cursor:pointer"><input type="checkbox" id="cad-wfocus" ${S.meta.wireFocus !== false ? 'checked' : ''} style="width:18px;height:18px;min-height:0"> Übrige Teile beim Bearbeiten ausblenden (Folienbild zeigt sie weiterhin)</label>
+  <p class="tiny"><span style="color:${SRC_COL};font-weight:700">■ Gerät</span> · <span style="color:${DST_COL};font-weight:700">■ Klemme</span> · Am Anschluss ein kurzes Aderstück in der eingetragenen Aderfarbe (ohne Angabe gelb). Aderenden lassen sich im 3D-Bild mit der Maus an die richtige Stelle ziehen – sie rasten nur auf dem zugeordneten Gerät bzw. der Klemme ein. Fehlt eine Klemme im Modell, im Reiter „⚡ Elektro“ ihre Position setzen.</p>`;
   const on = (id, ev, fn) => $('#' + id, el).addEventListener(ev, fn);
+  on('cad-wfocus', 'change', e => { S.meta.wireFocus = e.target.checked; applyStep(S.sel); needRender = true; });
   on('cad-ti', 'input', e => { st.title = e.target.value; st.auto = false; updateHead(); const t = $(`.cad-step[data-uid="${st.uid}"] .t`, ROOT); if (t) t.textContent = st.title; });
   on('cad-tx', 'input', e => { st.text = e.target.value; st.auto = false; });
   on('cad-to', 'input', e => { st.tools = e.target.value; st.toolsEdited = true; });
@@ -1675,11 +1678,18 @@ const wireStepShown = () => S.steps[S.sel]?.kind === 'wire';
 
 // ---------- Aderenden genau platzieren: Vorschaupunkt beim Setzen, Enden mit der Maus ziehen ----------
 let hoverDot = null, wireDrag = null, dragMoved = false;
-function surfaceHit(e, cam) {
+// Ziel-Flächen für ein Aderende: nur das zugeordnete Bauteil (Gerät/Klemme); ohne Zuordnung alle sichtbaren, nicht ausgeblendeten Teile
+function endTargets(connId, side) {
+  const E = elecInit(), c = E.conns.find(x => x.id === connId), e = c && c[side];
+  const m = e && e.bmk ? E.map[e.bmk] : null;
+  if (m && m.type === 'part' && m.ids.length) return m.ids.map(id => meshes[id]).filter(Boolean);
+  return meshes.filter(x => x.visible && x.material !== mats.ghost && x.material !== mats.faint);
+}
+function surfaceHit(e, cam, list) {
   const r = renderer.domElement.getBoundingClientRect();
   const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
   const rc = new THREE.Raycaster(); rc.setFromCamera(v, cam || camera);
-  return { rc, hit: rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.ghost), false)[0] };
+  return { rc, hit: rc.intersectObjects(list || meshes.filter(m => m.visible && m.material !== mats.ghost && m.material !== mats.faint), false)[0] };
 }
 function showHoverDot(p) {
   if (!hoverDot) {
@@ -1706,14 +1716,14 @@ function wirePointerDown(e) {
 let dragRaf = 0;
 function wirePointerMove(e) {
   if (wireDrag) {
-    const { rc, hit } = surfaceHit(e); if (!hit) return;
+    const { rc, hit } = surfaceHit(e, camera, endTargets(wireDrag.conn, wireDrag.side)); if (!hit) return;
     const c = elecInit().conns.find(x => x.id === wireDrag.conn); if (!c) return;
     c.pos = c.pos || {}; c.pos[wireDrag.side] = hitToPos(hit, rc); dragMoved = true;
     showHoverDot(hit.point);
     if (!dragRaf) dragRaf = requestAnimationFrame(() => { dragRaf = 0; applyStep(S.sel); needRender = true; });
     return;
   }
-  if (pickMode && pickMode.mode === 'wire') { const { hit } = surfaceHit(e); showHoverDot(hit ? hit.point : null); renderer.domElement.style.cursor = hit ? 'crosshair' : ''; return; }
+  if (pickMode && pickMode.mode === 'wire') { const { hit } = surfaceHit(e, camera, endTargets(pickMode.conn, pickMode.side)); showHoverDot(hit ? hit.point : null); renderer.domElement.style.cursor = hit ? 'crosshair' : ''; return; }
   if (wireStepShown() && wireGrips.length) {
     const r = renderer.domElement.getBoundingClientRect();
     const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
@@ -1741,7 +1751,7 @@ function applyWireStep(st) {
   for (const b of endsBmk) { const m = E.map[b]; if (m && m.type === 'part') (isDev(b) ? srcIds : dstIds).add(...m.ids); }
   meshes.forEach((m, id) => {
     m.position.set(0, 0, 0); ghostMeshes[id].visible = false; m.visible = true;
-    m.material = srcIds.has(id) ? mats.src : dstIds.has(id) ? mats.dst : mats.dim;
+    m.material = srcIds.has(id) ? mats.src : dstIds.has(id) ? mats.dst : (!offscreen && S.meta.wireFocus !== false ? mats.faint : mats.dim);
   });
   srcIds.forEach(id => box.union(S.parts[id].box)); dstIds.forEach(id => box.union(S.parts[id].box));
   // Ersatzpositionen für nicht platzierte Klemmen: neben dem Gerät
