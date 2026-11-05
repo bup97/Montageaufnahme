@@ -245,7 +245,7 @@
     if (failed.length) log(`Ohne Oberfläche: ${failed.length} Bauteil(e): ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ' …' : ''}`);
     // Baugruppe zusammensetzen
     const parts = []; let guard = 0;
-    const emit = (pd, W, path) => {
+    const emit = (pd, W, path, anc, key) => {   // anc = übergeordnete Baugruppen-Instanzen [{k, n}] (ohne Wurzel)
       if (++guard > 200000) throw new Error('Baugruppenstruktur zu tief verschachtelt');
       const name = M.pdName.get(pd);
       const m = meshOf.get(pd);
@@ -257,7 +257,7 @@
           const a = m.nrm[i * 3], b = m.nrm[i * 3 + 1], c = m.nrm[i * 3 + 2];
           nrm[i * 3] = W[0] * a + W[4] * b + W[8] * c; nrm[i * 3 + 1] = W[1] * a + W[5] * b + W[9] * c; nrm[i * 3 + 2] = W[2] * a + W[6] * b + W[10] * c;
         }
-        parts.push({ name, path: path.slice(), color: m.color, pos, nrm, idx: m.idx.slice() });
+        parts.push({ name, path: path.slice(), asm: anc.slice(), color: m.color, pos, nrm, idx: m.idx.slice() });
       }
       const ownReps = repGroup(M, pd).reps;
       for (const nauo of M.children.get(pd) || []) {
@@ -268,10 +268,10 @@
           // rep1 = Kind → Kind-in-Eltern = A2·A1⁻¹, sonst umgekehrt
           T = ownReps.has(pl.rep1) && !ownReps.has(pl.rep2) ? mul(A1, inv(A2)) : mul(A2, inv(A1));
         }
-        emit(info.child, mul(W, T), path.concat(name));
+        emit(info.child, mul(W, T), path.concat(name), key === null ? [] : anc.concat({ k: key, n: name }), (key || 'r') + '/' + nauo);
       }
     };
-    for (const r of M.roots) emit(r, I(), []);
+    for (const r of M.roots) emit(r, I(), [], [], null);
     const rootName = M.roots.length === 1 ? M.pdName.get(M.roots[0]) : '';
     log(`Zusammengesetzt: ${parts.length} Teile (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
     return { parts, rootName, failed: failed.length, products: M.pdName.size, withGeo: geo.size, occurrences: M.nauoInfo.size };

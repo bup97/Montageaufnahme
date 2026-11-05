@@ -334,8 +334,9 @@ function buildParts(res) {
     if (p.nrm && p.nrm.some(v => v !== 0)) g.setAttribute('normal', new THREE.BufferAttribute(p.nrm, 3)); else g.computeVertexNormals();
     g.setIndex(new THREE.BufferAttribute(p.idx, 1));
     g.computeBoundingBox();
-    return { id: p.id, name: p.name, clean: cleanName(p.name), geom: g, box: g.boundingBox.clone() };
+    return { id: p.id, name: p.name, clean: cleanName(p.name), asm: p.asm || [], geom: g, box: g.boundingBox.clone() };
   });
+  stripAsm();
   const rn = res.rootName || '';
   const segs = rn.split('_'); const last = segs.length > 1 ? segs[segs.length - 1] : '';
   if (/\d{3,}/.test(last)) { S.meta.title = segs.slice(0, -1).join('_').trim(); S.meta.art = last.trim(); }
@@ -353,7 +354,11 @@ async function runSequence() {
     await call({ type: 'load', parts: ps }, null, ps.flatMap(p => [p.pos.buffer, p.nrm.buffer, p.idx.buffer]));
     S.workerHasParts = true;
   }
-  const r = await call({ type: 'sequence', units, upAxis: S.meta.upAxis }, setPhase);
+  // Unterbaugruppen und Einpressteile gehen als je EIN starres Teil in die Reihenfolge ein
+  const off = new Set(S.meta.subOff || []);
+  const merge = S.meta.subJoin !== false ? subAssemblies().filter(g => !off.has(g.key)).map(g => ({ key: g.key, name: g.name, ids: g.ids })) : [];
+  const pem = S.meta.pemJoin !== false ? S.parts.filter(isPem).map(p => p.id) : [];
+  const r = await call({ type: 'sequence', units, upAxis: S.meta.upAxis, merge, pem }, setPhase);
   S.contacts = new Map(S.parts.map(p => [p.id, new Set()]));
   for (const [a, b] of r.contacts) { S.contacts.get(a).add(b); S.contacts.get(b).add(a); }
   S.boxVol = r.boxes.map(b => b.vol);
@@ -363,10 +368,37 @@ async function runSequence() {
     kind: s.base ? 'base' : s.sub ? 'sub' : s.fastener ? 'fast' : 'part',
     title: '', text: '', note: '', tools: '', auto: true, cam: null,
   }));
-  regenTexts();
   S.sel = 0;
+  S.units = (r.groups || []).map(g => Object.assign({}, g, { name: g.kind === 'pem' ? labelOf(S.parts[g.main]) : g.name }));
+  for (const g of S.units) {
+    const st = S.steps.find(x => x.parts.includes(g.main)); if (!st) continue;
+    st.main = g.main; if (g.kind === 'sub' && st.parts.every(id => g.ids.includes(id))) st.unit = g.name;
+    if (st.kind === 'fast') st.kind = 'part';
+  }
+  const nu = S.units.length;
+  if (nu) diag(`Einheiten zusammengefasst: ${S.units.filter(g => g.kind === 'sub').length} Unterbaugruppe(n), ${S.units.filter(g => g.kind === 'pem').length} Blechteil(e) mit Einpressteilen`);
+  regenTexts();
 }
 
+
+
+// ======================= Unterbaugruppen & Einpressteile als Einheit =======================
+// Unterbaugruppen aus dem CAD (z. B. Blech mit Einpressmuttern) und Einpressteile, die an einem Blechteil sitzen,
+// werden gemeinsam in EINEM Schritt gezeigt – sie kommen ja schon vormontiert an die Linie.
+const RX_PEM = /einpress|press-?in|\bpem\b|einniet|nietmutter|blindnietmutter|rivkle|nietbolzen|einpressbolzen|einpressmutter|\b(s|cls|cld|sp|fh|fhs|fhls|bso|so|soa|kfs2?|kf2|ks|pfhv|tso)[-_ ]?m?\d/i;
+function stripAsm() {                       // gemeinsame obere Ebenen (z. B. die Gesamtbaugruppe) entfernen
+  const all = S.parts.map(p => p.asm || []);
+  let n = 0;
+  while (all.length && all.every(a => a.length > n && a[n].k === all[0][n].k)) n++;
+  if (n) S.parts.forEach(p => { p.asm = (p.asm || []).slice(n); });
+}
+function subAssemblies() {
+  const m = new Map();
+  S.parts.forEach(p => { const a = p.asm && p.asm[0]; if (!a) return; if (!m.has(a.k)) m.set(a.k, { key: a.k, name: cleanName(a.n) || a.n || 'Baugruppe', ids: [] }); m.get(a.k).ids.push(p.id); });
+  return [...m.values()].filter(g => g.ids.length > 1);
+}
+const isPem = (p) => RX_PEM.test(p.name) || RX_PEM.test(labelOf(p));
+const unitOf = (id) => (S.units || []).find(g => g.ids.includes(id));
 
 // ======================= Angefangene Projekte speichern / fortsetzen =======================
 // Eigene IndexedDB (unabhängig von den Anleitungen): „sessions“ = Bearbeitungsstand (klein, wird laufend gesichert),
@@ -396,7 +428,7 @@ function snapshot() {
     meta: S.meta, bom: S.bom, match: S.match, boxVol: S.boxVol, sel: S.sel, warnings: S.warnings, loadInfo: S.loadInfo || null, detail: S.detail,
     contacts: [...S.contacts].map(([k, v]) => [k, [...v]]),
     steps: S.steps.map(({ _box, ...st }) => st),
-    parts: S.parts.map(p => ({ id: p.id, name: p.name })),
+    parts: S.parts.map(p => ({ id: p.id, name: p.name, asm: p.asm || [] })), units: S.units || [],
     elec: E ? Object.assign({}, E, { file: E.file ? { name: E.file.name } : null, busy: false }) : null,
   }));
 }
@@ -449,8 +481,9 @@ async function resumeSession(id) {
       geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       if (nn) geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3)); else geo.computeVertexNormals();
       geo.setIndex(new THREE.BufferAttribute(idx, 1)); geo.computeBoundingBox();
-      return { id: p.id, name: p.name, clean: cleanName(p.name), geom: geo, box: geo.boundingBox.clone() };
+      return { id: p.id, name: p.name, clean: cleanName(p.name), asm: p.asm || [], geom: geo, box: geo.boundingBox.clone() };
     });
+    stripAsm();
     Object.assign(S.meta, st.meta);
     S.bom = st.bom; S.match = st.match || {}; S.boxVol = st.boxVol || []; S.warnings = st.warnings || []; S.loadInfo = st.loadInfo; S.detail = st.detail || 'auto';
     S.contacts = new Map((st.contacts || []).map(([k, v]) => [k, new Set(v)]));
@@ -458,6 +491,7 @@ async function resumeSession(id) {
     S.elec = st.elec || null;
     S.stepFile = null; S.bomFile = null; S.stepName = rec.stepName; S.stepSize = rec.stepSize; S.bomName = rec.bomName;
     S.sessionId = id; S.takenAt = rec.takenAt || null; S.projectId = rec.projectId || null; S.workerHasParts = false;
+    S.units = st.units || [];
     buildScene(); S.analyzed = true; thumbs.clear(); insTab = 'step';
     render(); histReset(); setSaveState('saved');
   } catch (e) { console.error(e); toast('Öffnen fehlgeschlagen: ' + (e.message || e)); }
@@ -672,9 +706,12 @@ function genText(si) {
   const st = S.steps[si]; const groups = stepGroups(st);
   const dirW = st.dir >= 0 ? DIRWORD[S.meta.upAxis][st.dir] : '';
   const tgt = targetOf(si) || 'Baugruppe';
-  const g = groups[0]; const L = g.label; const q = qtyLabel(g);
+  const g = (st.main !== undefined && groups.find(x => x.ids.includes(st.main))) || groups[0]; const L = g.label; const q = qtyLabel(g);
   let title, lines = [], tools = [];
-  if (st.kind === 'base') {
+  if (st.unit && st.kind !== 'base') {
+    title = 'Baugruppe ' + st.unit + ' montieren';
+    lines = ['Vormontierte Baugruppe ' + st.unit + ' ' + dirW + ' an ' + tgt + ' ansetzen', 'Wie abgebildet ausrichten und befestigen'];
+  } else if (st.kind === 'base') {
     title = L + ' bereitlegen';
     lines = [L + ' als Grundteil bereitlegen', 'Wie abgebildet ausrichten'];
   } else if (st.kind === 'sub' && st.parts.length >= 2) {
@@ -932,9 +969,10 @@ function onPick(e) {
   // Teile im 3D anwählen: Klick = auswählen, Strg/Umschalt + Klick = zur Auswahl hinzufügen/entfernen
   if (!hit) { if (picked.size) { picked.clear(); applyStep(S.sel); } return renderPickBox(); }
   const id = hit.object.userData.id;
-  if (e.ctrlKey || e.metaKey || e.shiftKey) { if (picked.has(id)) picked.delete(id); else picked.add(id); }
-  else if (picked.size === 1 && picked.has(id)) picked.clear();
-  else { picked.clear(); picked.add(id); }
+  const u = !e.altKey && unitOf(id); const grp = u ? u.ids : [id];     // Einheit gemeinsam wählen (Alt + Klick: nur das Einzelteil)
+  if (e.ctrlKey || e.metaKey || e.shiftKey) { if (picked.has(id)) grp.forEach(x => picked.delete(x)); else grp.forEach(x => picked.add(x)); }
+  else if (picked.size === grp.length && grp.every(x => picked.has(x))) picked.clear();
+  else { picked.clear(); grp.forEach(x => picked.add(x)); }
   applyStep(S.sel); renderPickBox();
 }
 const picked = new Set();
@@ -1004,6 +1042,7 @@ const STYLE = `
 .cad-multibar{position:sticky;top:0;z-index:3;background:#fff;border:2px solid var(--brand);border-radius:var(--r-s);padding:8px 10px;display:grid;gap:5px;margin-bottom:6px;box-shadow:var(--shadow)}
 .cad-multibar select{min-height:36px;font-size:13px;padding:0 6px}.cad-multibar .btn{min-height:34px}
 .cad-step.multi{background:var(--brand-soft);box-shadow:inset 4px 0 0 var(--brand),var(--shadow)}
+.cad-sublist{display:grid;gap:4px;max-height:220px;overflow:auto;padding-left:26px}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
 .cad-toolbar select{min-height:38px;font-size:14px}
 .cad-list.tool-on .cad-step:not(.tool-hl){opacity:.38}
@@ -1368,10 +1407,30 @@ function renderOpt(el) {
       <div class="tiny" style="margin-top:4px">Bestimmt „von oben / von vorne“ und die Kameraansicht.</div></div>
     <div><label class="f" for="cad-mt">Produkt (für die Anleitung)</label><input id="cad-mt" value="${esc(S.meta.title)}"></div>
     <div><label class="f" for="cad-ma">Artikelnummer / Variante</label><input id="cad-ma" value="${esc(S.meta.art)}"></div>
+  </div>
+  <div class="sect">Zusammengehörige Teile</div>
+  <div class="card stack">
+    <label class="row" style="gap:8px;cursor:pointer;align-items:flex-start"><input type="checkbox" id="cad-pem" ${S.meta.pemJoin !== false ? 'checked' : ''} style="width:18px;height:18px;min-height:0;margin-top:2px"><span>Einpressmuttern/-bolzen und Nietmuttern mit ihrem Blechteil als ein Teil behandeln<br><span class="tiny">${(S.units || []).filter(g => g.kind === 'pem').length} Blechteil(e) erkannt (Name enthält z. B. „Einpress“, „PEM“, „S-M4“, „Nietmutter“).</span></span></label>
+    ${(() => { const subs = subAssemblies(); const off = new Set(S.meta.subOff || []);
+      if (!subs.length) return '<div class="tiny">Keine Unterbaugruppen in der CAD-Datei gefunden' + (S.parts.some(p => p.asm) ? '' : ' (Projekt vor Version 5.5.7 eingelesen – bitte neu analysieren)') + '.</div>';
+      return `<label class="row" style="gap:8px;cursor:pointer"><input type="checkbox" id="cad-subj" ${S.meta.subJoin !== false ? 'checked' : ''} style="width:18px;height:18px;min-height:0"> Unterbaugruppen aus dem CAD als ein Teil behandeln</label>
+        <div class="cad-sublist" ${S.meta.subJoin === false ? 'hidden' : ''}>${subs.map(g => `<label class="row tiny" style="gap:8px;cursor:pointer"><input type="checkbox" data-sub="${esc(g.key)}" ${off.has(g.key) ? '' : 'checked'} style="width:16px;height:16px;min-height:0"> ${esc(g.name)} <span class="muted">(${g.ids.length} Teile)</span></label>`).join('')}</div>`; })()}
+    <div class="tiny">Zusammengefasste Teile erscheinen gemeinsam in einem Schritt und werden im 3D gemeinsam ausgewählt (Alt + Klick wählt ein Einzelteil). Jede Änderung hier berechnet die Reihenfolge neu (eigene Anpassungen an Schritten gehen dabei verloren – Rückgängig ist möglich).</div>
   </div>`;
   $('#cad-up', el).addEventListener('change', e => { S.meta.upAxis = e.target.value; setUp(); S.steps.forEach(s => s.cam = null); regenTexts(); afterChange(); });
   $('#cad-mt', el).addEventListener('input', e => { S.meta.title = e.target.value; });
   $('#cad-ma', el).addEventListener('input', e => { S.meta.art = e.target.value; });
+  // Einschalten: vorhandene Schritte zusammenführen. Ausschalten: Reihenfolge neu berechnen (sonst blieben die Teile zusammen).
+  const changed = async (joinMore) => {
+    const stop = API.busy ? API.busy('Reihenfolge wird neu berechnet …') : () => {};
+    try { await runSequence(); thumbs.clear(); renderWork(); histTrack(); toast('Reihenfolge neu berechnet'); } finally { stop(); }
+  };
+  $('#cad-pem', el).addEventListener('change', e => { S.meta.pemJoin = e.target.checked; changed(e.target.checked); });
+  $('#cad-subj', el)?.addEventListener('change', e => { S.meta.subJoin = e.target.checked; changed(e.target.checked); });
+  $$('input[data-sub]', el).forEach(c => c.addEventListener('change', e => {
+    const off = new Set(S.meta.subOff || []); if (e.target.checked) off.delete(c.dataset.sub); else off.add(c.dataset.sub);
+    S.meta.subOff = [...off]; changed(e.target.checked);
+  }));
 }
 function bindList() {
   const list = $('#cad-list', ROOT); let dragFrom = null;

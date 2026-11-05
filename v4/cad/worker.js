@@ -463,7 +463,7 @@
           catch (e) { logLine('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = []; }
         } else {
           if (!res || !res.success) throw new Error('Die STEP-Datei konnte nicht gelesen werden.');
-          const walk = (n, path) => {
+          const walk = (n, path, anc, key, isRoot) => {
             const here = n.name ? path.concat(n.name) : path;
             if (n.meshes && n.meshes.length) {
               let nv = 0, ni = 0;
@@ -479,11 +479,11 @@
                 vo += p.length; io += ix.length;
                 if (!color && m.color) color = m.color;
               }
-              parts.push({ id: parts.length, name: n.name || ('Teil ' + (parts.length + 1)), path: here.slice(0, -1), color, pos, nrm, idx });
+              parts.push({ id: parts.length, name: n.name || ('Teil ' + (parts.length + 1)), path: here.slice(0, -1), asm: anc.slice(), color, pos, nrm, idx });
             }
-            (n.children || []).forEach(c => walk(c, here));
+            (n.children || []).forEach((c, ci) => walk(c, here, isRoot ? [] : anc.concat({ k: key, n: n.name || '' }), key + '/' + ci, false));
           };
-          walk(res.root, []);
+          walk(res.root, [], [], 'r', true);
           rootName = res.root && (res.root.name || (res.root.children && res.root.children.length === 1 ? res.root.children[0].name : '')) || '';
           res = null;                                       // Rohergebnis freigeben, bevor Kopien entstehen
         }
@@ -494,7 +494,7 @@
       if (!info.tris) { try { info.scan = scanStep(msg.buffer); } catch (e) { info.scan = { error: e.message }; } }
       msg.buffer = null;                                   // Rohdatei freigeben
       // Kopien senden, Originale fuer die Analyse behalten
-      const out = parts.map(p => ({ id: p.id, name: p.name, path: p.path, color: p.color, pos: p.pos.slice(), nrm: p.nrm.slice(), idx: p.idx.slice() }));
+      const out = parts.map(p => ({ id: p.id, name: p.name, path: p.path, asm: p.asm || [], color: p.color, pos: p.pos.slice(), nrm: p.nrm.slice(), idx: p.idx.slice() }));
       const transfer = [];
       out.forEach(p => transfer.push(p.pos.buffer, p.nrm.buffer, p.idx.buffer));
       info.log = occtLog.map(l => l.n > 1 ? `${l.t}  (${l.n}×)` : l.t);
@@ -513,17 +513,44 @@
           if (i % 3 === 0) post({ type: 'progress', phase: 'prep', value: i / parts.length });
         }
       }
-      const units = msg.units.map(u => Object.assign({}, u, { prep: preps[u.id] }));
+      // Kontakte zwischen Einzelteilen (für Texte und zum Erkennen, an welchem Blech ein Einpressteil sitzt)
+      const all = msg.units;
+      const contacts = [];
+      for (let a = 0; a < all.length; a++) for (let b = a + 1; b < all.length; b++) {
+        const A = preps[all[a].id], B = preps[all[b].id];
+        if (C.touching(A, B, 1.0) && C.inContact(A, B, 1.0)) contacts.push([all[a].id, all[b].id]);
+      }
+      // Einheiten bilden: Unterbaugruppen (vom Aufrufer) + Einpressteile an ihr größtes berührtes Nicht-Einpressteil
+      const groups = (msg.merge || []).map(g => ({ kind: 'sub', key: g.key, name: g.name, ids: g.ids.slice() }));
+      const groupOf = new Map(); groups.forEach(g => g.ids.forEach(id => groupOf.set(id, g)));
+      const pem = new Set(msg.pem || []);
+      const nb = new Map(); contacts.forEach(([a, b]) => { (nb.get(a) || nb.set(a, []).get(a)).push(b); (nb.get(b) || nb.set(b, []).get(b)).push(a); });
+      for (const id of pem) {
+        if (groupOf.has(id)) continue;
+        const cand = (nb.get(id) || []).filter(x => !pem.has(x)).sort((x, y) => preps[y].vol - preps[x].vol);
+        if (!cand.length) continue;
+        const main = cand[0]; let g = groupOf.get(main);
+        if (!g) { g = { kind: 'pem', key: 'pem:' + main, name: '', ids: [main] }; groups.push(g); groupOf.set(main, g); }
+        g.ids.push(id); groupOf.set(id, g);
+      }
+      groups.forEach(g => { g.main = g.ids.slice().sort((x, y) => preps[y].vol - preps[x].vol)[0]; });
+      // Für die Reihenfolge: jede Einheit als EIN starres Teil (Geometrie zusammengeführt)
+      const units = [];
+      for (const u of all) {
+        const g = groupOf.get(u.id);
+        if (!g) { units.push(Object.assign({}, u, { prep: preps[u.id] })); continue; }
+        if (u.id !== g.main) continue;
+        let nv = 0, ni = 0; g.ids.forEach(id => { nv += parts[id].pos.length; ni += parts[id].idx.length; });
+        const pos = new Float32Array(nv), nrm = new Float32Array(nv), idx = new Uint32Array(ni); let vo = 0, io = 0;
+        g.ids.forEach(id => { const q = parts[id]; pos.set(q.pos, vo); if (q.nrm && q.nrm.length === q.pos.length) nrm.set(q.nrm, vo); const base = vo / 3; for (let k = 0; k < q.idx.length; k++) idx[io + k] = q.idx[k] + base; vo += q.pos.length; io += q.idx.length; });
+        units.push(Object.assign({}, u, { label: g.name || u.label, group: 'unit:' + g.key, fastener: false, elastic: false, prep: C.preparePart({ pos, nrm, idx }, 2000) }));
+      }
       post({ type: 'progress', phase: 'seq', value: 0 });
       const seq = C.computeSequence(units, { upAxis: msg.upAxis || 'z' }, v => post({ type: 'progress', phase: 'seq', value: v }));
-      // Kontakte fuer Textbausteine (welches Teil an welchem)
-      const contacts = [];
-      for (let a = 0; a < units.length; a++) for (let b = a + 1; b < units.length; b++) {
-        const A = units[a].prep, B = units[b].prep;
-        if (C.touching(A, B, 1.0) && C.inContact(A, B, 1.0)) contacts.push([units[a].id, units[b].id]);
-      }
+      // Einheiten in den Schritten wieder in ihre Einzelteile auflösen
+      seq.steps.forEach(st => { st.parts = st.parts.flatMap(id => { const g = groupOf.get(id); return g && g.main === id ? g.ids : [id]; }); });
       const boxes = preps.map(p => ({ min: p.min, max: p.max, vol: p.vol }));
-      return { result: { steps: seq.steps, warnings: seq.warnings, contacts, boxes } };
+      return { result: { steps: seq.steps, warnings: seq.warnings, contacts, boxes, groups } };
     }
     throw new Error('Unbekannte Anfrage');
   }
