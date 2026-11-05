@@ -831,7 +831,7 @@ function attachViewer(el) {
   resizeObs?.disconnect();
   resizeObs = new ResizeObserver(() => {
     const w = el.clientWidth, h = el.clientHeight; if (!w || !h) return;
-    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); needRender = true;
+    renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); needRender = true; placeFrame();
   });
   resizeObs.observe(el);
 }
@@ -934,8 +934,19 @@ function setCam(cam, v, ctrl) {
   cam.position.fromArray(v.p); cam.near = v.near || 1; cam.far = v.far || 1e5; cam.updateProjectionMatrix();
   if (ctrl) { ctrl.target.fromArray(v.t); ctrl.update(); } else cam.lookAt(new THREE.Vector3().fromArray(v.t));
 }
+const SLIDE_W = 1600, SLIDE_H = 1500, SLIDE_ASPECT = SLIDE_W / SLIDE_H;   // Bildgröße auf der Folie
 const camFor = (si, cam, aspect) => S.steps[si].cam || autoCam(si, cam, aspect);
-function showStep(si) { applyStep(si); setCam(camera, camFor(si, camera, camera.aspect), controls); }
+// 3D-Ansicht: automatisch so einpassen, dass alles im Folienausschnitt liegt (nicht nur in der breiteren Ansicht)
+const viewAspect = () => Math.min(camera.aspect, SLIDE_ASPECT);
+// Rahmen in der 3D-Ansicht = genau der Bereich, der aufs Folienbild kommt (gleiche Kamera, gleicher Öffnungswinkel)
+function placeFrame() {
+  const v = ROOT && $('#cad-viewer', ROOT), f = v && $('#cad-frame', v); if (!f) return;
+  const W = v.clientWidth, H = v.clientHeight;
+  const show = S.meta.frame !== false && W && H && S.steps[S.sel] && W / H > SLIDE_ASPECT * 1.01;
+  f.hidden = !show; if (!show) return;
+  const w = H * SLIDE_ASPECT; f.style.left = ((W - w) / 2) + 'px'; f.style.width = w + 'px'; f.style.top = '0'; f.style.height = H + 'px';
+}
+function showStep(si) { applyStep(si); setCam(camera, camFor(si, camera, viewAspect()), controls); placeFrame(); }
 /* Bild eines Schritts – mit derselben Zeichenfläche wie die 3D-Ansicht, damit das Modell
    nur einmal im Grafikspeicher liegt (vorher: zweite Zeichenfläche → bei großen Modellen leere Bilder). */
 function renderTo(si, w, h, bg) {
@@ -1073,6 +1084,9 @@ const STYLE = `
 .cad-step.multi{background:var(--brand-soft);box-shadow:inset 4px 0 0 var(--brand),var(--shadow)}
 .cad-ptab tr.mat-off td{opacity:.45}.cad-ptab tr.mat-off td:first-child{opacity:1}.mat-vis{width:18px;height:18px;min-height:0;accent-color:var(--brand)}
 .el-block{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}.el-block .chip button{border:0;background:none;cursor:pointer;margin-left:2px;padding:0 2px;font-size:14px;color:var(--ink3)}
+.cad-frame{position:absolute;pointer-events:none;z-index:1;border:2px dashed rgba(149,36,86,.85);box-shadow:0 0 0 9999px rgba(30,34,40,.22);border-radius:2px}
+.cad-viewer{overflow:hidden}
+.cad-frame span{position:absolute;left:6px;top:6px;font:600 11px/1 system-ui,sans-serif;color:#fff;background:rgba(149,36,86,.85);padding:3px 6px;border-radius:4px}
 .cad-sublist{display:grid;gap:4px;max-height:220px;overflow:auto;padding-left:26px}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
 .cad-toolbar select{min-height:38px;font-size:14px}
@@ -1297,6 +1311,7 @@ function renderWork() {
       </div>`; }).join('')}</div>
     <div class="banner" id="cad-gpu" ${gpuLost ? '' : 'hidden'} style="grid-column:1/-1">Der Grafikspeicher reicht für dieses Modell nicht – Bilder und 3D-Ansicht bleiben leer. Bitte „Andere Dateien“ wählen, Detailgrad <b>„Grob“</b> einstellen und die Analyse erneut starten.</div>
     <div class="cad-viewer" id="cad-viewer">
+      <div class="cad-frame" id="cad-frame" hidden aria-hidden="true"><span>Folienbild</span></div>
       <div class="cad-vtop">
         <div class="cad-vtitle"><div class="k" id="cad-vk"></div><div class="h" id="cad-vh"></div></div>
         <div class="cad-tools">
@@ -1304,6 +1319,7 @@ function renderWork() {
           <button class="cad-tg" data-cad="ghost" aria-pressed="${S.meta.ghost}">Folgeteile</button>
           <button class="cad-tg" data-cad="camsave">Ansicht merken</button>
           <button class="cad-tg" data-cad="camauto">Auto</button>
+          <button class="cad-tg" data-cad="frame" aria-pressed="${S.meta.frame !== false}" title="Rahmen zeigen, welcher Ausschnitt aufs Folienbild kommt">▭ Folie</button>
           <button class="cad-tg" data-cad="undo" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" style="font-size:18px" ${HIST.undo.length ? '' : 'disabled'}>↶</button>
           <button class="cad-tg" data-cad="redo" title="Wiederholen (Strg+Y)" aria-label="Wiederholen" style="font-size:18px" ${HIST.redo.length ? '' : 'disabled'}>↷</button>
         </div>
@@ -1901,8 +1917,8 @@ function applyWireStep(st) {
       const tip = start.clone().add(dir.clone().multiplyScalar(stubLen));
       const bend = start.clone().add(out.clone().multiplyScalar(stubLen * 0.55));
       const curve = new THREE.QuadraticBezierCurve3(start, bend, tip);
-      wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0042, 10, false), mat));
-      const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0045, 12, 8), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
+      wireGroup.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 16, diag * 0.0022, 10, false), mat));
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.0028, 12, 8), mat); cap.position.copy(start); wireGroup.add(cap);   // Anschlusspunkt
       // unsichtbare, größere Greiffläche: Aderende mit der Maus verschieben
       const grip = new THREE.Mesh(new THREE.SphereGeometry(diag * 0.02, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
       grip.position.copy(start); grip.userData = { conn: c.id, side: sideKey }; wireGroup.add(grip); wireGrips.push(grip);
@@ -2110,6 +2126,7 @@ document.addEventListener('click', e => {
     case 'tostart': { const i = S.sel, to = S.steps[0]?.kind === 'base' ? 1 : 0; moveStep(i, to); return toast(`Schritt ${i + 1} ist jetzt Schritt ${to + 1}`); }
     case 'merge': { const st = S.steps[S.sel], prev = S.steps[S.sel - 1]; prev.parts.push(...st.parts); st.parts = []; S.sel--; return afterChange(); }
     case 'undo': return undo();
+    case 'frame': S.meta.frame = S.meta.frame === false; el.setAttribute('aria-pressed', S.meta.frame !== false); return placeFrame();
     case 'multimove': return moveStepsTo($('#cad-multi-to', ROOT).value);
     case 'multimerge': return mergeSelected();
     case 'multiclear': stepSel.clear(); return markSteps();
