@@ -680,6 +680,28 @@ function stepGroups(step) {
   }
   return [...m.values()];
 }
+
+// Materialzeilen eines Schritts für die Anleitung. Bei Unterbaugruppen erscheint standardmäßig nur die Baugruppe selbst
+// (eine Zeile), ihre Einzelteile sind ausgeblendet; bei Blech + Einpressteilen sind die Einpressteile ausgeblendet.
+// Jede Zeile lässt sich ein-/ausblenden (st.matVis[key]).
+function bomByName(name) {
+  if (!S.bom || !name) return null; let bi = -1, bs = 0;
+  S.bom.rows.forEach((b, i) => { const sc = scoreMatch(name, b); if (sc > bs) { bs = sc; bi = i; } });
+  return bs >= 50 ? S.bom.rows[bi] : null;
+}
+function stepMaterials(st) {
+  const groups = stepGroups(st), rows = [], hideIds = new Set();
+  const units = (S.units || []).filter(g => st.parts.includes(g.main));
+  const subs = new Map();
+  for (const g of units) {
+    if (g.kind === 'sub') { g.ids.forEach(id => hideIds.add(id)); const k = 'unit:' + norm(g.name); if (!subs.has(k)) subs.set(k, { key: k, label: g.name, bom: bomByName(g.name), ids: [], unit: true }); subs.get(k).ids.push(g.main); }
+    else g.ids.forEach(id => { if (id !== g.main) hideIds.add(id); });
+  }
+  for (const u of subs.values()) rows.push(Object.assign(u, { qty: u.ids.length, def: true }));
+  for (const g of groups) rows.push(Object.assign(g, { key: groupOf(S.parts[g.ids[0]]), qty: g.ids.length, def: !g.ids.every(id => hideIds.has(id)) }));
+  rows.forEach(r => { const v = st.matVis && st.matVis[r.key]; r.show = v === undefined ? r.def : v; });
+  return rows;
+}
 function placedBefore(si) { const s = new Set(); for (let i = 0; i < si; i++) S.steps[i].parts.forEach(p => s.add(p)); return s; }
 function targetOf(si) {
   const placed = placedBefore(si); const st = S.steps[si];
@@ -1049,6 +1071,7 @@ const STYLE = `
 .cad-multibar{position:sticky;top:0;z-index:3;background:#fff;border:2px solid var(--brand);border-radius:var(--r-s);padding:8px 10px;display:grid;gap:5px;margin-bottom:6px;box-shadow:var(--shadow)}
 .cad-multibar select{min-height:36px;font-size:13px;padding:0 6px}.cad-multibar .btn{min-height:34px}
 .cad-step.multi{background:var(--brand-soft);box-shadow:inset 4px 0 0 var(--brand),var(--shadow)}
+.cad-ptab tr.mat-off td{opacity:.45}.cad-ptab tr.mat-off td:first-child{opacity:1}.mat-vis{width:18px;height:18px;min-height:0;accent-color:var(--brand)}
 .el-block{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:6px}.el-block .chip button{border:0;background:none;cursor:pointer;margin-left:2px;padding:0 2px;font-size:14px;color:var(--ink3)}
 .cad-sublist{display:grid;gap:4px;max-height:220px;overflow:auto;padding-left:26px}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
@@ -1315,7 +1338,7 @@ function renderIns() {
   if (insTab === 'elec') return renderElec(el);
   const st = S.steps[S.sel]; if (!st) { el.innerHTML = ''; return; }
   if (st.kind === 'wire') return renderWireIns(el, st);
-  const groups = stepGroups(st);
+  const groups = stepGroups(st); const mats = stepMaterials(st);
   const cut = (t) => t.length > 34 ? t.slice(0, 33) + '…' : t;
   const stepOpts = `<option value="${S.sel}" selected>Schritt ${S.sel + 1} (hier)</option>
     <optgroup label="Als neuen Schritt einfügen"><option value="new:after">→ neuer Schritt ${S.sel + 2} (danach)</option><option value="new:before">→ neuer Schritt ${S.sel + 1} (davor)</option><option value="new:end">→ neuer Schritt ${S.steps.length + 1} (ganz am Ende)</option></optgroup>
@@ -1336,9 +1359,10 @@ function renderIns() {
   </div>
   <div class="sect" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">Material in diesem Schritt
     ${groups.length > 1 || st.colors ? `<span style="flex:1"></span><span class="row" style="gap:4px"><button class="btn sm ghost" data-cad="contrast" style="min-height:30px" title="Jede Teileart in diesem Schritt bekommt eine eigene Farbe">🎨 Kontrastfarben</button>${st.colors ? '<button class="btn sm ghost" data-cad="colreset" style="min-height:30px">↺ Standard</button>' : ''}</span>` : ''}</div>
-  <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th>Anz.</th><th>Bezeichnung</th><th>Schritt</th></tr></thead><tbody>
-    ${groups.map((g, gi) => g.ids.map((id, k) => `<tr>${k === 0 ? `<td rowspan="${g.ids.length}"><b>${g.ids.length}×</b><br><input type="color" class="cad-col" data-gcol="${g.ids.join(',')}" value="${st.colors?.[g.ids[0]] || CONTRAST[0]}" title="Farbe dieser Teile im Bild" aria-label="Farbe für ${esc(g.label)}"></td><td rowspan="${g.ids.length}">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select></td></tr>`).join('')).join('')}
-  </tbody></table></div>
+  <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th title="In der Anleitung zeigen">👁</th><th>Anz.</th><th>Bezeichnung</th><th>Schritt</th></tr></thead><tbody>
+    ${mats.filter(r => r.unit).map(r => `<tr class="${r.show ? '' : 'mat-off'}"><td><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td><b>${r.qty}×</b></td><td>📦 ${esc(r.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${r.bom ? esc(r.bom.art) : 'Unterbaugruppe · ohne Art.-Nr.'}</div></td><td class="tiny">als Einheit</td></tr>`).join('')}
+    ${groups.map((g, gi) => { const r = mats.find(x => !x.unit && x.key === groupOf(S.parts[g.ids[0]])) || { show: true, key: '' }; return g.ids.map((id, k) => `<tr class="${r.show ? '' : 'mat-off'}">${k === 0 ? `<td rowspan="${g.ids.length}"><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td rowspan="${g.ids.length}"><b>${g.ids.length}×</b><br><input type="color" class="cad-col" data-gcol="${g.ids.join(',')}" value="${st.colors?.[g.ids[0]] || CONTRAST[0]}" title="Farbe dieser Teile im Bild" aria-label="Farbe für ${esc(g.label)}"></td><td rowspan="${g.ids.length}">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select></td></tr>`).join(''); }).join('')}
+  </tbody></table>${mats.some(r => !r.show) ? `<div class="tiny" style="margin-top:6px">Ausgegraute Zeilen (ohne Häkchen) erscheinen nicht in der Materialliste der Anleitung.</div>` : ''}</div>
   <div class="row" style="margin-top:10px;flex-wrap:wrap">
     <button class="btn sm" data-cad="merge" ${S.sel === 0 ? 'disabled' : ''}>Mit vorherigem zusammenfassen</button>
     <button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''} title="Direkt nach dem Grundteil einordnen">⤒ An den Anfang</button>
@@ -1353,6 +1377,7 @@ function renderIns() {
   on('cad-to', 'change', () => renderWork());   // Werkzeug-Chips und Hervorhebung auffrischen
   on('cad-no', 'input', e => { st.note = e.target.value; st.noteEdited = true; });
   on('cad-dir', 'change', e => { st.dir = +e.target.value; st.cam = null; afterChange(); });
+  $$('input[data-matvis]', el).forEach(c => c.addEventListener('change', () => { st.matVis = st.matVis || {}; st.matVis[c.dataset.matvis] = c.checked; renderIns(); }));
   $$('input[data-gcol]', el).forEach(inp => {
     const apply = (final) => { st.colors = st.colors || {}; inp.dataset.gcol.split(',').forEach(id => { st.colors[+id] = inp.value; }); applyStep(S.sel); if (final) { thumbs.delete(st.uid); scheduleThumbs(); renderIns(); } };
     inp.addEventListener('input', () => apply(false)); inp.addEventListener('change', () => apply(true));
@@ -2045,7 +2070,7 @@ async function takeOver() {
         title: st.title.slice(0, 70),
         instructions: st.text,
         warning: st.note || '',
-        materials: groups.map(g => ({ number: g.bom?.art || '–', description: g.label, quantity: g.ids.length })),
+        materials: stepMaterials(st).filter(r => r.show).map(r => ({ number: r.bom?.art || '–', description: r.label, quantity: r.qty })),
         tools,
         image: { blob, w: 1600, h: 1500 },
       });
