@@ -42,7 +42,7 @@
   // Argumente eines (Teil-)Eintrags: TYP( a, b, (c,d), 'x' )
   function args(body, type) {
     let at = 0;
-    if (type) { const m = new RegExp('(^|[\\s(])' + type + '\\s*\\(').exec(body); if (!m) return null; at = m.index + m[0].length; }
+    if (type) { const m = new RegExp('(^|[\\s()])' + type + '\\s*\\(').exec(body); if (!m) return null; at = m.index + m[0].length; }
     else at = body.indexOf('(') + 1;
     const out = []; let depth = 0, inStr = false, cur = '';
     for (let i = at; i < body.length; i++) {
@@ -92,12 +92,12 @@
     for (const [id, b] of ents) {
       const t = typeOf(b);
       if (t === '(COMPLEX)') { (byType.get(t) || byType.set(t, []).get(t)).push(id); continue; }
-      if (/^(PRODUCT_DEFINITION|PRODUCT_DEFINITION_FORMATION|PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE|PRODUCT|PRODUCT_DEFINITION_SHAPE|SHAPE_DEFINITION_REPRESENTATION|NEXT_ASSEMBLY_USAGE_OCCURRENCE|CONTEXT_DEPENDENT_SHAPE_REPRESENTATION|SHAPE_REPRESENTATION_RELATIONSHIP)$/.test(t))
+      if (/^(PRODUCT_DEFINITION|PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS|DOCUMENT_FILE|APPLIED_DOCUMENT_REFERENCE|PRODUCT_DEFINITION_FORMATION|PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE|PRODUCT|PRODUCT_DEFINITION_SHAPE|SHAPE_DEFINITION_REPRESENTATION|NEXT_ASSEMBLY_USAGE_OCCURRENCE|CONTEXT_DEPENDENT_SHAPE_REPRESENTATION|SHAPE_REPRESENTATION_RELATIONSHIP)$/.test(t))
         (byType.get(t) || byType.set(t, []).get(t)).push(id);
     }
     const get = (t) => byType.get(t) || [];
     const pdName = new Map();
-    for (const pd of get('PRODUCT_DEFINITION')) {
+    for (const pd of [...get('PRODUCT_DEFINITION'), ...get('PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS')]) {
       const f = ref(args(ents.get(pd))[2]); const fa = f && ents.get(f) ? args(ents.get(f)) : null;
       const p = fa ? ref(fa[2]) : null; const pa = p && ents.get(p) ? args(ents.get(p)) : null;
       pdName.set(pd, pa ? (str(pa[1]) || str(pa[0])) : 'Teil');
@@ -134,7 +134,12 @@
       placeOf.set(nauo, { rep1: ref(ra[2]), rep2: ref(ra[3]), it1: ref(ti[2]), it2: ref(ti[3]) });
     }
     const roots = [...pdName.keys()].filter(pd => !isChild.has(pd));
-    return { pdName, repsOfPd, sdrOfPd, srr, children, nauoInfo, placeOf, roots };
+    // Externe Verweise (Teile in eigenen STEP-Dateien): Dateiname je Bauteil
+    const fileOf = (d) => { const a = args(ents.get(d) || ''); if (!a) return ''; const c = [str(a[0]), str(a[1])].find(x => /\.(stp|step|p21)$/i.test(x)) || str(a[0]) || str(a[1]); return c; };
+    const docOfPd = new Map();
+    for (const r of get('APPLIED_DOCUMENT_REFERENCE')) { const a = args(ents.get(r)); const f = fileOf(ref(a[0])); for (const id of refs(a[2] || '')) if (pdName.has(id) && f) docOfPd.set(id, f); }
+    for (const pd of get('PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS')) { const a = args(ents.get(pd)); for (const d of refs(a[4] || '')) { const f = fileOf(d); if (f && !docOfPd.has(pd)) docOfPd.set(pd, f); } }
+    return { pdName, repsOfPd, sdrOfPd, srr, children, nauoInfo, placeOf, roots, docOfPd, docCount: get('DOCUMENT_FILE').length };
   }
 
   function lengthScale(ents) {
@@ -188,7 +193,9 @@
   const SOLID = /\b(MANIFOLD_SOLID_BREP|BREP_WITH_VOIDS|FACETED_BREP|SHELL_BASED_SURFACE_MODEL|TRIANGULATED_FACE|TESSELLATED_SOLID|TESSELLATED_SHELL)\s*\(/;
 
   // ---------- Hauptfunktion ----------
-  function read(occt, u8, mesh, post, log) {
+  // opts.ext(name) → Uint8Array der externen Datei (oder null); opts.cache teilt gelesene Dateien zwischen Ebenen
+  function read(occt, u8, mesh, post, log, opts) {
+    opts = opts || {}; const depth = opts.depth || 0; const cache = opts.cache || (opts.cache = new Map()); const missing = opts.missing || (opts.missing = new Set());
     const t0 = Date.now();
     const txt = latin1(u8);
     const { header, ents } = parse(txt);
@@ -244,11 +251,38 @@
     }
     if (failed.length) log(`Ohne Oberfläche: ${failed.length} Bauteil(e): ${failed.slice(0, 8).join(', ')}${failed.length > 8 ? ' …' : ''}`);
     // Baugruppe zusammensetzen
-    const parts = []; let guard = 0;
+    const parts = []; let guard = 0, extDone = 0;
+    if (!depth && opts.ext) opts.extTotal = new Set([...M.docOfPd.values()]).size || 0;
     const emit = (pd, W, path, anc, key) => {   // anc = übergeordnete Baugruppen-Instanzen [{k, n}] (ohne Wurzel)
       if (++guard > 200000) throw new Error('Baugruppenstruktur zu tief verschachtelt');
       const name = M.pdName.get(pd);
-      const m = meshOf.get(pd);
+      let m = meshOf.get(pd);
+      // keine eigene Geometrie, aber Verweis auf eine eigene Datei → diese lesen (einmal je Datei) und hier einsetzen
+      const fname = !m && M.docOfPd.get(pd);
+      if (fname && opts.ext && depth < 8) {
+        const key0 = fname.split(/[\\/]/).pop().toLowerCase();
+        if (!cache.has(key0)) {
+          const bytes = opts.ext(fname);
+          if (!bytes) { cache.set(key0, null); missing.add(fname.split(/[\\/]/).pop()); }
+          else { try { cache.set(key0, read(occt, bytes, mesh, () => {}, log, Object.assign({}, opts, { depth: depth + 1 })).parts); } catch (e) { log('Fehler in ' + fname + ': ' + (e.message || e)); cache.set(key0, null); } }
+          extDone++; if (opts.extTotal) post({ type: 'progress', phase: 'read', value: Math.min(1, extDone / opts.extTotal) });
+        }
+        const sub = cache.get(key0);
+        if (sub && sub.length) {
+          const single = sub.length === 1;
+          for (const sp of sub) {
+            const n = sp.pos.length / 3, pos = new Float32Array(sp.pos.length), nrm = new Float32Array(sp.nrm.length);
+            for (let i = 0; i < n; i++) {
+              const x = sp.pos[i * 3], y = sp.pos[i * 3 + 1], z = sp.pos[i * 3 + 2];
+              pos[i * 3] = W[0] * x + W[4] * y + W[8] * z + W[12]; pos[i * 3 + 1] = W[1] * x + W[5] * y + W[9] * z + W[13]; pos[i * 3 + 2] = W[2] * x + W[6] * y + W[10] * z + W[14];
+              const a = sp.nrm[i * 3], b = sp.nrm[i * 3 + 1], c = sp.nrm[i * 3 + 2];
+              nrm[i * 3] = W[0] * a + W[4] * b + W[8] * c; nrm[i * 3 + 1] = W[1] * a + W[5] * b + W[9] * c; nrm[i * 3 + 2] = W[2] * a + W[6] * b + W[10] * c;
+            }
+            const own = key === null ? [] : anc.concat({ k: key, n: name });
+            parts.push({ name: single ? name : sp.name, path: single ? path.slice() : path.concat(name, sp.path.slice(1)), asm: single ? anc.slice() : own.concat((sp.asm || []).map(q => ({ k: (key || 'r') + '>' + q.k, n: q.n }))), color: sp.color, pos, nrm, idx: sp.idx.slice() });
+          }
+        }
+      }
       if (m) {
         const n = m.pos.length / 3, pos = new Float32Array(m.pos.length), nrm = new Float32Array(m.nrm.length);
         for (let i = 0; i < n; i++) {
@@ -274,7 +308,9 @@
     for (const r of M.roots) emit(r, I(), [], [], null);
     const rootName = M.roots.length === 1 ? M.pdName.get(M.roots[0]) : '';
     log(`Zusammengesetzt: ${parts.length} Teile (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
-    return { parts, rootName, failed: failed.length, products: M.pdName.size, withGeo: geo.size, occurrences: M.nauoInfo.size };
+    if (!depth && missing.size) log(`Fehlende Teiledateien (${missing.size}): ${[...missing].slice(0, 12).join(', ')}${missing.size > 12 ? ' …' : ''}`);
+    if (!depth && cache.size) log(`Externe Teiledateien gelesen: ${[...cache.values()].filter(Boolean).length} von ${cache.size}`);
+    return { parts, rootName, failed: failed.length, products: M.pdName.size, withGeo: geo.size, occurrences: M.nauoInfo.size, docs: M.docCount, missing: [...missing], extRead: [...cache.values()].filter(Boolean).length };
   }
 
   const api = { read, parse, model };

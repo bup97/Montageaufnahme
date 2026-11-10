@@ -262,6 +262,68 @@ function setPhase(phase, value) {
     readTimer = setInterval(() => { const r = $('.cad-prog-row[data-phase="read"].active .v', ROOT); if (r) r.textContent = Math.round((performance.now() - t0) / 1000) + ' s'; else clearInterval(readTimer); }, 500);
   }
 }
+
+// ======================= STEP mit externen Teiledateien =======================
+// SolidWorks kann eine Baugruppe so exportieren, dass die Hauptdatei nur die Struktur enthält und jedes Teil
+// in einer eigenen STEP-Datei liegt (DOCUMENT_FILE-Verweise). Dann werden diese Dateien mitgelesen.
+const RX_GEO = /MANIFOLD_SOLID_BREP|BREP_WITH_VOIDS|SHELL_BASED_SURFACE_MODEL|FACETED_BREP|TESSELLATED_SHELL|TESSELLATED_SOLID/;
+const baseName = (n) => String(n).split(/[\\/]/).pop();
+const stemOf = (n) => baseName(n).toLowerCase().replace(/\.(stp|step|p21)$/i, '');
+async function scanStepRefs(file) {
+  if (!file || file.size > 80 * 1048576) return { refs: [], geo: true };
+  const txt = await file.text();
+  const refs = new Set(), re = /DOCUMENT_FILE\s*\(\s*'([^']*)'\s*,\s*'([^']*)'/g; let m;
+  while ((m = re.exec(txt))) { const f = [m[1], m[2]].find(x => /\.(stp|step|p21)$/i.test(x)) || m[1]; if (f) refs.add(baseName(f)); }
+  return { refs: [...refs], geo: RX_GEO.test(txt) };
+}
+// Welche der gewählten Dateien werden (auch verschachtelt) gebraucht, welche fehlen?
+async function resolveExt() {
+  const pool = S.extPool || new Map(), need = new Map(), missing = new Set();
+  const find = (n) => pool.get(baseName(n).toLowerCase()) || [...pool.values()].find(f => stemOf(f.name) === stemOf(n));
+  const queue = (S.extRefs || []).slice(), seen = new Set();
+  while (queue.length) {
+    const n = queue.shift(), k = stemOf(n); if (seen.has(k)) continue; seen.add(k);
+    const f = find(n); if (!f) { missing.add(baseName(n)); continue; }
+    need.set(f.name.toLowerCase(), f);
+    const sub = await scanStepRefs(f); sub.refs.forEach(r => queue.push(r));
+  }
+  S.extNeed = need; S.extMissing = [...missing];
+}
+async function chooseStep(files) {
+  const steps = [...files].filter(f => /\.(stp|step|p21)$/i.test(f.name));
+  if (!steps.length) return toast('Bitte eine STEP-Datei (.step/.stp) wählen');
+  let main = steps[0];
+  if (steps.length > 1) {                     // mehrere gewählt: Hauptdatei = die, auf die keine andere verweist (und die selbst verweist)
+    const info = await Promise.all(steps.map(async f => ({ f, ...(await scanStepRefs(f)) })));
+    const referenced = new Set(info.flatMap(i => i.refs.map(stemOf)));
+    const cands = info.filter(i => !referenced.has(stemOf(i.f.name))).sort((a, b) => b.refs.length - a.refs.length || b.f.size - a.f.size);
+    main = (cands[0] || info.sort((a, b) => b.f.size - a.f.size)[0]).f;
+    S.extPool = new Map(steps.filter(f => f !== main).map(f => [f.name.toLowerCase(), f]));
+  } else S.extPool = S.extPool && S.stepFile && S.stepFile.name === main.name ? S.extPool : new Map();
+  S.stepFile = main;
+  const sc = await scanStepRefs(main);
+  S.extRefs = sc.geo ? [] : sc.refs;
+  await resolveExt();
+  renderStart();
+}
+async function addExtFiles(files) {
+  const add = [...files].filter(f => /\.(stp|step|p21)$/i.test(f.name));
+  S.extPool = S.extPool || new Map(); add.forEach(f => S.extPool.set(f.name.toLowerCase(), f));
+  await resolveExt(); renderStart();
+  toast(`${add.length} STEP-Dateien übernommen – ${S.extNeed.size} davon werden gebraucht`);
+}
+function extPanel() {
+  if (!S.stepFile || !(S.extRefs || []).length) return '';
+  const miss = S.extMissing || [], got = S.extNeed ? S.extNeed.size : 0, ok = !miss.length;
+  return `<div class="banner ${ok ? 'info' : ''} cad-ext" style="${ok ? '' : 'background:#fff4e5;border-color:#f0b860'}">
+    <b>${ok ? '✓ Alle Teiledateien gefunden' : '📁 Diese STEP-Datei enthält nur die Baugruppenstruktur'}</b><br>
+    <span class="small">${ok ? `${got} Teiledatei(en) werden mitgelesen.` : `Die Teile liegen in ${S.extRefs.length} eigenen STEP-Dateien (z. B. „${esc(S.extRefs[0])}“). Bitte den Ordner wählen, in dem sie liegen – oder alle Dateien auf einmal markieren und hierher ziehen.`}
+    ${got && miss.length ? `<br>${got} gefunden, <b>${miss.length} fehlen</b>: ${esc(miss.slice(0, 6).join(', '))}${miss.length > 6 ? ' …' : ''}` : ''}</span>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <label class="btn sm ${ok ? '' : 'primary'}">📁 Ordner wählen<input type="file" id="cad-f-dir" webkitdirectory directory multiple hidden></label>
+      <label class="btn sm">Dateien wählen<input type="file" id="cad-f-ext" multiple accept=".step,.stp,.STEP,.STP" hidden></label>
+    </div></div>`;
+}
 async function analyze() {
   const err = $('#cad-err', ROOT); err.hidden = true;
   $('#cad-go', ROOT).disabled = true; $('#cad-prog', ROOT).hidden = false;
@@ -278,12 +340,18 @@ async function analyze() {
     setPhase('wasm', 0);
     const buf = await S.stepFile.arrayBuffer();
     const detail = S.detail === 'auto' || !S.detail ? autoDetail(S.stepFile.size) : S.detail;
-    const res = await call({ type: 'parse', buffer: buf, mesh: DETAIL_MESH[detail], split: window.CAD_SPLIT }, setPhase, [buf]);
+    let ext = null; const transfer = [buf];
+    if (S.extNeed && S.extNeed.size) {
+      ext = {}; for (const [k, f] of S.extNeed) { const b = await f.arrayBuffer(); ext[k] = b; transfer.push(b); }
+      diag(`Externe Teiledateien: ${S.extNeed.size}${(S.extMissing || []).length ? `, fehlen: ${S.extMissing.length}` : ''}`);
+    } else if ((S.extRefs || []).length) diag(`Datei verweist auf ${S.extRefs.length} Teiledateien – keine gewählt`);
+    const res = await call({ type: 'parse', buffer: buf, mesh: DETAIL_MESH[detail], split: window.CAD_SPLIT, ext }, setPhase, transfer);
     const tri = res.parts.reduce((a, p) => a + p.idx.length / 3, 0);
     console.info(`[CAD] ${res.parts.length} Teile, ${(tri / 1e6).toFixed(2)} Mio. Dreiecke, Detailgrad ${detail}`);
     S.loadInfo = { parts: res.parts.length, tri, detail, empty: res.parts.filter(p => !p.idx.length).length };
     diag(`Eingelesen: ${res.parts.length} Teile, ${tri.toLocaleString('de-DE')} Dreiecke (Detailgrad ${DETAILS.find(d => d[0] === detail)[1]})`);
     const I = res.info || {};
+    if (I.docs) diag(`Teiledateien: ${I.extRead || 0} gelesen${(I.missing || []).length ? `, ${I.missing.length} fehlen (${I.missing.slice(0, 8).join(', ')}${I.missing.length > 8 ? ' …' : ''})` : ''}`);
     if (/split/.test(I.mode || '')) diag(`Zerlegt gelesen${I.mode === 'whole→split' ? ' (zweiter Versuch)' : ''}: ${I.products} Bauteile, ${I.withGeo} mit Geometrie, ${I.occurrences} Einbauten${I.failed ? `, ${I.failed} ohne Oberfläche` : ''}`);
     diag(`STEP-Leser: Speicher ${I.heapMB ?? '?'} MB von 2048 MB · Netze ${I.meshes ?? '–'} · Punkte ${(I.verts ?? 0).toLocaleString('de-DE')} · Dreiecke ${(I.tris ?? 0).toLocaleString('de-DE')}`);
     if (I.scan) {
@@ -298,6 +366,7 @@ async function analyze() {
       const solids = (ty.MANIFOLD_SOLID_BREP || 0) + (ty.BREP_WITH_VOIDS || 0) + (ty.FACETED_BREP || 0) + (ty.SHELL_BASED_SURFACE_MODEL || 0);
       let why = 'Die Datei wurde gelesen (' + res.parts.length + ' Teile), aber es ließ sich keine darstellbare Geometrie erzeugen.';
       if (!solids && tess) why += ' Die Datei enthält nur vorvernetzte AP242-Daten. Bitte in SolidWorks als STEP AP214 exportieren.';
+      else if (!solids && !tess && (ty.DOCUMENT_FILE || (S.extRefs || []).length)) why += ` Die Datei enthält nur die Baugruppenstruktur, die Teile liegen in ${ty.DOCUMENT_FILE || S.extRefs.length} eigenen STEP-Dateien. Bitte oben bei „3D-Modell“ zusätzlich den Ordner mit diesen Teiledateien wählen (oder alle Dateien gemeinsam markieren).`;
       else if (!solids && !tess) why += ' In der Datei sind keine Volumenkörper enthalten (nur Baugruppenstruktur). Bitte beim Export „Volumenkörper/Flächen“ statt nur Struktur wählen.';
       else if (I.heapMB >= 1900) why += ' Der Speicher des STEP-Lesers war voll. Bitte die Baugruppe vereinfacht oder in Unterbaugruppen exportieren.';
       else why += ' Bitte die Diagnose unten kopieren und an den Ersteller schicken.';
@@ -1203,13 +1272,14 @@ function renderStart() {
   <div class="stack">
     <div class="banner info"><b>Montageanleitung aus 3D-Modell</b><br><span class="small">STEP-Datei der Baugruppe und Stückliste laden. Die App schlägt eine Montagereihenfolge mit Bildern, Material und Texten vor. Danach übernimmst du sie als normale Anleitung und bearbeitest sie wie gewohnt.</span></div>
     <div class="cad-drops">
-      <label class="cad-drop ${S.stepFile ? 'filled' : ''}" id="cad-d-step"><input type="file" id="cad-f-step" accept=".step,.stp,.STEP,.STP">
+      <label class="cad-drop ${S.stepFile ? 'filled' : ''}" id="cad-d-step"><input type="file" id="cad-f-step" multiple accept=".step,.stp,.STEP,.STP">
         <span class="ic">🧊</span><b>3D-Modell (STEP)</b><span class="small muted">Pflicht · Export aus SolidWorks (.step/.stp)</span>
         <span class="file" id="cad-n-step">${S.stepFile ? esc(S.stepFile.name) + ' · ' + (S.stepFile.size / 1048576).toFixed(1) + ' MB' : ''}</span></label>
       <label class="cad-drop ${S.bomFile ? 'filled' : ''}" id="cad-d-bom"><input type="file" id="cad-f-bom" accept=".xlsx,.csv,.txt">
         <span class="ic">📋</span><b>Stückliste</b><span class="small muted">Empfohlen · .xlsx oder .csv mit Pos., Art.-Nr., Benennung, Menge (optional Drehmoment)</span>
         <span class="file" id="cad-n-bom">${S.bomFile ? esc(S.bomFile.name) : ''}</span></label>
     </div>
+    ${extPanel()}
     <div class="row" style="gap:10px;align-items:flex-end;flex-wrap:wrap">
       <div style="flex:1 1 220px"><label class="f" for="cad-detail">Detailgrad</label>
         <select id="cad-detail">${DETAILS.map(([k, l]) => `<option value="${k}" ${S.detail === k ? 'selected' : ''}>${l}${k === 'auto' && S.stepFile ? ' – ' + DETAILS.find(d => d[0] === autoDetail(S.stepFile.size))[1] : ''}</option>`).join('')}</select></div>
@@ -1238,11 +1308,15 @@ function renderStart() {
     const z = $('#' + zoneId, ROOT), inp = $('#' + inputId, ROOT);
     z.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); z.classList.add('over'); });
     z.addEventListener('dragleave', () => z.classList.remove('over'));
-    z.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) cb(f); });
-    inp.addEventListener('change', () => { const f = inp.files[0]; if (f) cb(f); });
+    z.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); const f = e.dataTransfer.files; if (f.length) cb(f); });
+    inp.addEventListener('change', () => { const f = inp.files; if (f.length) cb(f); });
   };
-  bind('cad-d-step', 'cad-f-step', f => { S.stepFile = f; renderStart(); });
-  bind('cad-d-bom', 'cad-f-bom', f => { S.bomFile = f; renderStart(); });
+  bind('cad-d-step', 'cad-f-step', fs => chooseStep(fs));
+  $('#cad-f-dir', ROOT)?.addEventListener('change', e => addExtFiles(e.target.files));
+  $('#cad-f-ext', ROOT)?.addEventListener('change', e => addExtFiles(e.target.files));
+  const ep = $('.cad-ext', ROOT);
+  if (ep) { ep.addEventListener('dragover', e => { e.preventDefault(); ep.classList.add('over'); }); ep.addEventListener('drop', e => { e.preventDefault(); addExtFiles(e.dataTransfer.files); }); }
+  bind('cad-d-bom', 'cad-f-bom', fs => { S.bomFile = fs[0]; renderStart(); });
   $('#cad-go', ROOT).addEventListener('click', analyze);
   $('#cad-detail', ROOT)?.addEventListener('change', e => { S.detail = e.target.value; });
   renderSessions();

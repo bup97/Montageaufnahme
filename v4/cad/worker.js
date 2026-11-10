@@ -438,16 +438,20 @@
       const SPLIT_FROM = 30 * 1048576;                     // große Dateien: in Einzelteile zerlegen (Speichergrenze des Lesers)
       const splitRead = () => {
         if (typeof root.StepSplit === 'undefined' && typeof importScripts === 'function') importScripts((msg.base || '') + 'stepsplit.js');
-        const r = root.StepSplit.read(occt, new Uint8Array(msg.buffer), mesh, post, logLine);
+        // externe Teiledateien (Baugruppe verweist auf eigene STEP-Dateien je Teil)
+        const ext = msg.ext || null, stem = (n) => n.replace(/\.(stp|step|p21)$/i, '');
+        const extFn = ext ? (name) => { const b = String(name).split(/[\\/]/).pop().toLowerCase(); let buf = ext[b];
+          if (!buf) { const k = Object.keys(ext).find(k => stem(k) === stem(b)); buf = k && ext[k]; } return buf ? new Uint8Array(buf) : null; } : null;
+        const r = root.StepSplit.read(occt, new Uint8Array(msg.buffer), mesh, post, logLine, { ext: extFn });
         parts = r.parts.map((p, i) => Object.assign(p, { id: i }));
         return r;
       };
       let info = null, rootName = '';
       parts = []; preps = null;
-      if (msg.split === true || (msg.buffer.byteLength >= SPLIT_FROM && msg.split !== false)) {
+      if (msg.split === true || msg.ext || (msg.buffer.byteLength >= SPLIT_FROM && msg.split !== false)) {
         try {
           const r = splitRead(); rootName = r.rootName;
-          info = { mode: 'split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed };
+          info = { mode: 'split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed, docs: r.docs, missing: r.missing, extRead: r.extRead };
         } catch (e) { logLine('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = []; }
       }
       if (!info) {
