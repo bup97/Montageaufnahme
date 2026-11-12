@@ -7,8 +7,11 @@
 (function (root) {
   'use strict';
 
-  // ---------- Text der Datei in Einträge zerlegen ----------
+  // ---------- Datei in Einträge zerlegen – direkt auf den Bytes ----------
+  // Sehr große Dateien (> ~500 MB) passen nicht als EIN Text in den Browser. Deshalb werden nur die Positionen der
+  // Einträge gemerkt und jeder Eintrag erst bei Bedarf in Text umgewandelt.
   function latin1(u8) {
+    if (u8.length < 0x8000) return String.fromCharCode.apply(null, u8);
     const parts = [], CH = 0x8000;
     for (let o = 0; o < u8.length; o += CH) parts.push(String.fromCharCode.apply(null, u8.subarray(o, Math.min(u8.length, o + CH))));
     return parts.join('');
@@ -18,26 +21,58 @@
     for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); b[i] = c < 256 ? c : 63; }
     return b;
   }
-  function parse(txt) {
-    const dataAt = txt.search(/\bDATA\s*;/);
-    if (dataAt < 0) throw new Error('Kein DATA-Abschnitt');
-    const header = txt.slice(0, dataAt);
-    const ents = new Map();
-    let i = txt.indexOf(';', dataAt) + 1, start = i, inStr = false;
-    const n = txt.length;
-    for (; i < n; i++) {
-      const c = txt.charCodeAt(i);
-      if (c === 39) inStr = !inStr;                     // '
-      else if (c === 59 && !inStr) {                    // ;
-        const st = txt.slice(start, i).trim(); start = i + 1;
-        if (st.charCodeAt(0) === 35) {                  // #
-          const eq = st.indexOf('=');
-          ents.set(+st.slice(1, eq), st.slice(eq + 1).trim());
-        } else if (/^ENDSEC/.test(st)) break;
-      }
+  class Ents {
+    constructor(u8, idA, stA, enA, n) {
+      this.u8 = u8; this.n = n; this.idA = idA; this.stA = stA; this.enA = enA;
+      let max = 0; for (let i = 0; i < n; i++) if (idA[i] > max) max = idA[i];
+      if (max < 60e6) { this.slot = new Int32Array(max + 1).fill(-1); for (let i = 0; i < n; i++) this.slot[idA[i]] = i; }
+      else { this.map = new Map(); for (let i = 0; i < n; i++) this.map.set(idA[i], i); }
+      this.size = n;
     }
-    return { header, ents };
+    _i(id) { if (this.slot) return id >= 0 && id < this.slot.length ? this.slot[id] : -1; const v = this.map.get(id); return v === undefined ? -1 : v; }
+    has(id) { return this._i(id) >= 0; }
+    get(id) { const i = this._i(id); return i < 0 ? undefined : latin1(this.u8.subarray(this.stA[i], this.enA[i])); }
+    // Typname ohne den ganzen Eintrag zu lesen; '(COMPLEX)' für zusammengesetzte Einträge
+    typeAt(id) {
+      const i = this._i(id); if (i < 0) return ''; const u = this.u8; let p = this.stA[i]; const e = this.enA[i];
+      if (u[p] === 40) return '(COMPLEX)';
+      let t = ''; while (p < e) { const c = u[p]; if ((c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95) { t += String.fromCharCode(c); p++; } else break; }
+      return t;
+    }
+    *ids() { for (let i = 0; i < this.n; i++) yield this.idA[i]; }
+    *[Symbol.iterator]() { for (let i = 0; i < this.n; i++) yield [this.idA[i], this.get(this.idA[i])]; }
+    values() { const self = this; return (function* () { for (let i = 0; i < self.n; i++) yield latin1(self.u8.subarray(self.stA[i], self.enA[i])); })(); }
   }
+  function parseBytes(u8) {
+    // DATA-Abschnitt finden (Kopf ist klein)
+    const headTxt = latin1(u8.subarray(0, Math.min(u8.length, 4 << 20)));
+    const dm = /\bDATA\s*;/.exec(headTxt); if (!dm) throw new Error('Kein DATA-Abschnitt');
+    const header = headTxt.slice(0, dm.index);
+    let cap = Math.max(1024, Math.min(1 << 26, (u8.length / 40) | 0));
+    let idA = new Uint32Array(cap), stA = new Uint32Array(cap), enA = new Uint32Array(cap), n = 0;
+    const grow = () => { cap *= 2; const a = new Uint32Array(cap); a.set(idA); idA = a; const b = new Uint32Array(cap); b.set(stA); stA = b; const c = new Uint32Array(cap); c.set(enA); enA = c; };
+    const L = u8.length; let i = dm.index + dm[0].length, start = i, inStr = false;
+    const isWs = (c) => c === 32 || c === 10 || c === 13 || c === 9;
+    for (; i < L; i++) {
+      const c = u8[i];
+      if (c === 39) { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (c === 47 && u8[i + 1] === 42) { const e = u8.indexOf(42, i + 2); let j = e; while (j >= 0 && u8[j + 1] !== 47) j = u8.indexOf(42, j + 1); i = j < 0 ? L : j + 1; continue; }  // /* … */
+      if (c !== 59) continue;                           // ;
+      let a = start; start = i + 1;
+      while (a < i && isWs(u8[a])) a++;
+      if (u8[a] === 35) {                               // #id = body
+        let id = 0, p = a + 1; while (p < i && u8[p] >= 48 && u8[p] <= 57) { id = id * 10 + (u8[p] - 48); p++; }
+        while (p < i && u8[p] !== 61) p++; p++;         // '='
+        while (p < i && isWs(u8[p])) p++;
+        let e = i; while (e > p && isWs(u8[e - 1])) e--;
+        if (n >= cap) grow();
+        idA[n] = id; stA[n] = p; enA[n] = e; n++;
+      } else if (u8[a] === 69 && u8[a + 1] === 78 && u8[a + 2] === 68 && u8[a + 3] === 83) break;   // ENDSEC
+    }
+    return { header, ents: new Ents(u8, idA, stA, enA, n) };
+  }
+  function parse(txt) { return parseBytes(toBytes(txt)); }
   const typeOf = (b) => { const m = /^([A-Z0-9_]+)\s*\(/.exec(b); return m ? m[1] : '(COMPLEX)'; };
   // Argumente eines (Teil-)Eintrags: TYP( a, b, (c,d), 'x' )
   function args(body, type) {
@@ -89,8 +124,8 @@
   // ---------- Aufbau der Baugruppe ----------
   function model(ents) {
     const byType = new Map();
-    for (const [id, b] of ents) {
-      const t = typeOf(b);
+    for (const id of ents.ids()) {
+      const t = ents.typeAt(id);
       if (t === '(COMPLEX)') { (byType.get(t) || byType.set(t, []).get(t)).push(id); continue; }
       if (/^(PRODUCT_DEFINITION|PRODUCT_DEFINITION_WITH_ASSOCIATED_DOCUMENTS|DOCUMENT_FILE|APPLIED_DOCUMENT_REFERENCE|PRODUCT_DEFINITION_FORMATION|PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE|PRODUCT|PRODUCT_DEFINITION_SHAPE|SHAPE_DEFINITION_REPRESENTATION|NEXT_ASSEMBLY_USAGE_OCCURRENCE|CONTEXT_DEPENDENT_SHAPE_REPRESENTATION|SHAPE_REPRESENTATION_RELATIONSHIP)$/.test(t))
         (byType.get(t) || byType.set(t, []).get(t)).push(id);
@@ -143,8 +178,9 @@
   }
 
   function lengthScale(ents) {
-    for (const b of ents.values()) {
-      if (b.indexOf('LENGTH_UNIT') < 0) continue;
+    for (const id of ents.ids()) {
+      const t = ents.typeAt(id); if (t !== '(COMPLEX)' && t !== 'CONVERSION_BASED_UNIT' && t !== 'SI_UNIT') continue;
+      const b = ents.get(id); if (b.indexOf('LENGTH_UNIT') < 0) continue;
       const si = /SI_UNIT\s*\(\s*(\.[A-Z]+\.|\$)\s*,\s*\.METRE\./.exec(b);
       if (si) return { '$': 1000, '.MILLI.': 1, '.CENTI.': 10, '.DECI.': 100, '.KILO.': 1e6, '.MICRO.': 0.001 }[si[1]] || 1;
       if (/CONVERSION_BASED_UNIT\s*\(\s*'INCH'/i.test(b)) return 25.4;
@@ -153,7 +189,7 @@
     return 1;
   }
   function placement(ents, id, scale) {
-    const b = ents.get(id); if (!b || typeOf(b) !== 'AXIS2_PLACEMENT_3D') return I();
+    if (ents.typeAt(id) !== 'AXIS2_PLACEMENT_3D') return I(); const b = ents.get(id);
     const a = args(b);
     const pt = nums(args(ents.get(ref(a[1])))[1]).map(v => v * scale);
     const dir = (r) => { const e = r != null ? ents.get(r) : null; return e ? norm(nums(args(e)[1])) : null; };
@@ -175,36 +211,51 @@
     return { reps, rels };
   }
   // Eigene Datei für ein Bauteil: alles, was von seinen Darstellungen aus erreichbar ist
+  // Verweise direkt aus den Bytes lesen (#123) – ohne Text
+  function refsAt(ents, id, out) {
+    const i = ents._i(id); if (i < 0) return false; const u = ents.u8, e = ents.enA[i]; let p = ents.stA[i], inStr = false;
+    for (; p < e; p++) { const c = u[p]; if (c === 39) { inStr = !inStr; continue; } if (inStr || c !== 35) continue;
+      let v = 0, q = p + 1; while (q < e && u[q] >= 48 && u[q] <= 57) { v = v * 10 + (u[q] - 48); q++; } if (q > p + 1) out.push(v); p = q - 1; }
+    return true;
+  }
   function closure(ents, starts) {
     const seen = new Set(), stack = [...starts];
     while (stack.length) {
       const id = stack.pop(); if (seen.has(id)) continue;
-      const b = ents.get(id); if (b === undefined) continue;
-      seen.add(id); for (const r of refs(b)) if (!seen.has(r)) stack.push(r);
+      if (!refsAt(ents, id, stack)) continue;
+      seen.add(id);
     }
     return seen;
   }
-  function stepText(ents, header, seen) {
-    const lines = [header, 'DATA;\n'];
-    for (const id of [...seen].sort((a, b) => a - b)) lines.push('#' + id + '=' + ents.get(id) + ';\n');
-    lines.push('ENDSEC;\nEND-ISO-10303-21;\n');
-    return lines.join('');
+  // Teil-Datei direkt als Bytes zusammensetzen (kein großer Text)
+  function stepBytes(ents, header, seen) {
+    const ids = [...seen].sort((a, b) => a - b), enc = (t) => toBytes(t);
+    const head = enc(header + 'DATA;\n'), tail = enc('ENDSEC;\nEND-ISO-10303-21;\n');
+    let len = head.length + tail.length; const pre = [];
+    for (const id of ids) { const i = ents._i(id); const p = enc('#' + id + '='); pre.push(p); len += p.length + (ents.enA[i] - ents.stA[i]) + 2; }
+    const out = new Uint8Array(len); let o = 0; out.set(head, o); o += head.length;
+    ids.forEach((id, k) => { const i = ents._i(id); out.set(pre[k], o); o += pre[k].length; out.set(ents.u8.subarray(ents.stA[i], ents.enA[i]), o); o += ents.enA[i] - ents.stA[i]; out[o++] = 59; out[o++] = 10; });
+    out.set(tail, o);
+    return out;
   }
+  const SOLID_T = new Set(['MANIFOLD_SOLID_BREP', 'BREP_WITH_VOIDS', 'FACETED_BREP', 'SHELL_BASED_SURFACE_MODEL', 'TRIANGULATED_FACE', 'TESSELLATED_SOLID', 'TESSELLATED_SHELL']);
   const SOLID = /\b(MANIFOLD_SOLID_BREP|BREP_WITH_VOIDS|FACETED_BREP|SHELL_BASED_SURFACE_MODEL|TRIANGULATED_FACE|TESSELLATED_SOLID|TESSELLATED_SHELL)\s*\(/;
 
   // ---------- Hauptfunktion ----------
   // opts.ext(name) → Uint8Array der externen Datei (oder null); opts.cache teilt gelesene Dateien zwischen Ebenen
-  function read(occt, u8, mesh, post, log, opts) {
+  // opts.renew() → neuer STEP-Leser (frischer Speicher), wenn der alte voll ist oder abstürzt
+  async function read(occt, u8, mesh, post, log, opts) {
     opts = opts || {}; const depth = opts.depth || 0; const cache = opts.cache || (opts.cache = new Map()); const missing = opts.missing || (opts.missing = new Set());
+    const cur = opts.cur || (opts.cur = { o: occt, renewed: 0 });
     const t0 = Date.now();
-    const txt = latin1(u8);
-    const { header, ents } = parse(txt);
+    const { header, ents } = parseBytes(u8);
+    if (!depth) log(`Datei zerlegt: ${ents.size.toLocaleString('de-DE')} Einträge (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
     const M = model(ents);
     if (!M.pdName.size) throw new Error('Keine Bauteile gefunden');
     const scale = lengthScale(ents);
     // Farben: STYLED_ITEM zeigt auf die Geometrie (nicht umgekehrt) – daher getrennt nachschlagen
     const styled = new Map();
-    for (const [id, b] of ents) if (/^(OVER_RIDING_)?STYLED_ITEM\s*\(/.test(b)) { const it = ref(args(b)[2]); if (it) (styled.get(it) || styled.set(it, []).get(it)).push(id); }
+    for (const id of ents.ids()) { const t = ents.typeAt(id); if (t !== 'STYLED_ITEM' && t !== 'OVER_RIDING_STYLED_ITEM') continue; const it = ref(args(ents.get(id))[2]); if (it) (styled.get(it) || styled.set(it, []).get(it)).push(id); }
     const colorOf = (seen) => {
       for (const id of seen) for (const si of styled.get(id) || []) {
         const st = [si], vis = new Set();
@@ -221,7 +272,7 @@
       if (!g.reps.size) continue;
       const starts = [...(M.sdrOfPd.get(pd) || []), ...g.rels];
       const seen = closure(ents, starts);
-      let has = false; for (const id of seen) if (SOLID.test(ents.get(id))) { has = true; break; }
+      let has = false; for (const id of seen) if (SOLID_T.has(ents.typeAt(id))) { has = true; break; }
       if (has) geo.set(pd, starts);
     }
     log(`Zerlegt: ${M.pdName.size} Bauteile, davon ${geo.size} mit Geometrie, ${M.nauoInfo.size} Einbauten (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
@@ -230,8 +281,17 @@
     for (const [pd, starts] of geo) {
       const seen = closure(ents, starts);
       let r = null;
-      try { r = occt.ReadStepFile(toBytes(stepText(ents, header, seen)), { linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio', linearDeflection: mesh.lin, angularDeflection: mesh.ang }); }
-      catch (e) { log('Fehler bei ' + M.pdName.get(pd) + ': ' + (e && e.message || e)); }
+      const bytes = stepBytes(ents, header, seen);
+      const opt = { linearUnit: 'millimeter', linearDeflectionType: 'bounding_box_ratio', linearDeflection: mesh.lin, angularDeflection: mesh.ang };
+      for (let attempt = 0; attempt < 2 && !r; attempt++) {
+        try { r = cur.o.ReadStepFile(bytes, opt); }
+        catch (e) {
+          log('Fehler bei ' + M.pdName.get(pd) + ': ' + (e && e.message || e));
+          if (opts.renew && attempt === 0) { cur.o = await opts.renew(); cur.renewed++; log('STEP-Leser neu gestartet'); } else break;
+        }
+      }
+      // Speicher des Lesers wächst mit jedem Teil – rechtzeitig frisch starten
+      if (opts.renew && cur.o.HEAPU8.buffer.byteLength > 1400 * 1048576) { cur.o = await opts.renew(); cur.renewed++; }
       let nv = 0, ni = 0;
       if (r && r.meshes) for (const m of r.meshes) { nv += m.attributes.position.array.length; ni += m.index ? m.index.array.length : 0; }
       if (!ni) { failed.push(M.pdName.get(pd)); }
@@ -253,7 +313,7 @@
     // Baugruppe zusammensetzen
     const parts = []; let guard = 0, extDone = 0;
     if (!depth && opts.ext) opts.extTotal = new Set([...M.docOfPd.values()]).size || 0;
-    const emit = (pd, W, path, anc, key) => {   // anc = übergeordnete Baugruppen-Instanzen [{k, n}] (ohne Wurzel)
+    const emit = async (pd, W, path, anc, key) => {   // anc = übergeordnete Baugruppen-Instanzen [{k, n}] (ohne Wurzel)
       if (++guard > 200000) throw new Error('Baugruppenstruktur zu tief verschachtelt');
       const name = M.pdName.get(pd);
       let m = meshOf.get(pd);
@@ -264,7 +324,7 @@
         if (!cache.has(key0)) {
           const bytes = opts.ext(fname);
           if (!bytes) { cache.set(key0, null); missing.add(fname.split(/[\\/]/).pop()); }
-          else { try { cache.set(key0, read(occt, bytes, mesh, () => {}, log, Object.assign({}, opts, { depth: depth + 1 })).parts); } catch (e) { log('Fehler in ' + fname + ': ' + (e.message || e)); cache.set(key0, null); } }
+          else { try { cache.set(key0, (await read(cur.o, bytes, mesh, () => {}, log, Object.assign({}, opts, { depth: depth + 1 }))).parts); } catch (e) { log('Fehler in ' + fname + ': ' + (e.message || e)); cache.set(key0, null); } }
           extDone++; if (opts.extTotal) post({ type: 'progress', phase: 'read', value: Math.min(1, extDone / opts.extTotal) });
         }
         const sub = cache.get(key0);
@@ -302,17 +362,18 @@
           // rep1 = Kind → Kind-in-Eltern = A2·A1⁻¹, sonst umgekehrt
           T = ownReps.has(pl.rep1) && !ownReps.has(pl.rep2) ? mul(A1, inv(A2)) : mul(A2, inv(A1));
         }
-        emit(info.child, mul(W, T), path.concat(name), key === null ? [] : anc.concat({ k: key, n: name }), (key || 'r') + '/' + nauo);
+        await emit(info.child, mul(W, T), path.concat(name), key === null ? [] : anc.concat({ k: key, n: name }), (key || 'r') + '/' + nauo);
       }
     };
-    for (const r of M.roots) emit(r, I(), [], [], null);
+    for (const r of M.roots) await emit(r, I(), [], [], null);
     const rootName = M.roots.length === 1 ? M.pdName.get(M.roots[0]) : '';
     log(`Zusammengesetzt: ${parts.length} Teile (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
     if (!depth && missing.size) log(`Fehlende Teiledateien (${missing.size}): ${[...missing].slice(0, 12).join(', ')}${missing.size > 12 ? ' …' : ''}`);
     if (!depth && cache.size) log(`Externe Teiledateien gelesen: ${[...cache.values()].filter(Boolean).length} von ${cache.size}`);
-    return { parts, rootName, failed: failed.length, products: M.pdName.size, withGeo: geo.size, occurrences: M.nauoInfo.size, docs: M.docCount, missing: [...missing], extRead: [...cache.values()].filter(Boolean).length };
+    if (!depth && cur.renewed) log(`STEP-Leser ${cur.renewed}× neu gestartet (Speicher)`);
+    return { parts, rootName, failed: failed.length, heapMB: Math.round(cur.o.HEAPU8.buffer.byteLength / 1048576), occt: cur.o, products: M.pdName.size, withGeo: geo.size, occurrences: M.nauoInfo.size, docs: M.docCount, missing: [...missing], extRead: [...cache.values()].filter(Boolean).length };
   }
 
-  const api = { read, parse, model };
+  const api = { read, parse, parseBytes, model };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.StepSplit = api;
 })(typeof self !== 'undefined' ? self : this);

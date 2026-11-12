@@ -431,18 +431,22 @@
   async function handle(msg, post) {
     if (msg.type === 'parse') {
       post({ type: 'progress', phase: 'wasm', value: 0 });
-      const occt = await getOcct(msg.base || '');
+      let occt = await getOcct(msg.base || '');
       post({ type: 'progress', phase: 'read', value: 0 });
       const mesh = msg.mesh || { lin: 0.001, ang: 0.2 };
       occtLog.length = 0;
       const SPLIT_FROM = 30 * 1048576;                     // große Dateien: in Einzelteile zerlegen (Speichergrenze des Lesers)
-      const splitRead = () => {
+      // Fortschritt live melden (erscheint in der Diagnose, auch wenn später etwas abbricht)
+      const live = (t) => { logLine(t); post({ type: 'log', line: String(t) }); };
+      const renew = async () => { occtPromise = null; occt = await getOcct(msg.base || ''); return occt; };
+      const splitRead = async () => {
         if (typeof root.StepSplit === 'undefined' && typeof importScripts === 'function') importScripts((msg.base || '') + 'stepsplit.js');
         // externe Teiledateien (Baugruppe verweist auf eigene STEP-Dateien je Teil)
         const ext = msg.ext || null, stem = (n) => n.replace(/\.(stp|step|p21)$/i, '');
         const extFn = ext ? (name) => { const b = String(name).split(/[\\/]/).pop().toLowerCase(); let buf = ext[b];
           if (!buf) { const k = Object.keys(ext).find(k => stem(k) === stem(b)); buf = k && ext[k]; } return buf ? new Uint8Array(buf) : null; } : null;
-        const r = root.StepSplit.read(occt, new Uint8Array(msg.buffer), mesh, post, logLine, { ext: extFn });
+        const r = await root.StepSplit.read(occt, new Uint8Array(msg.buffer), mesh, post, live, { ext: extFn, renew });
+        occt = r.occt || occt; delete r.occt;
         parts = r.parts.map((p, i) => Object.assign(p, { id: i }));
         return r;
       };
@@ -450,9 +454,13 @@
       parts = []; preps = null;
       if (msg.split === true || msg.ext || (msg.buffer.byteLength >= SPLIT_FROM && msg.split !== false)) {
         try {
-          const r = splitRead(); rootName = r.rootName;
+          const r = await splitRead(); rootName = r.rootName;
           info = { mode: 'split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed, docs: r.docs, missing: r.missing, extRead: r.extRead };
-        } catch (e) { logLine('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = []; }
+        } catch (e) {
+          live('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = [];
+          // sehr große Dateien NICHT als Ganzes lesen – das sprengt den Speicher des Lesers sicher
+          if (msg.buffer.byteLength > 250 * 1048576) throw new Error('Die Datei ist zu groß, um sie als Ganzes zu lesen, und ließ sich nicht zerlegen: ' + (e && e.message || e));
+        }
       }
       if (!info) {
         let res = occt.ReadStepFile(new Uint8Array(msg.buffer), {
@@ -463,7 +471,7 @@
         let tris = 0; if (res && res.meshes) res.meshes.forEach(m => { tris += m.index ? (m.index.array.length / 3) | 0 : 0; });
         if (!tris && msg.split !== false) {                 // nichts erzeugt (Speicher voll?) – zweiter Versuch: zerlegt
           res = null; logLine('Keine Oberflächen – zweiter Versuch mit zerlegter Datei');
-          try { const r = splitRead(); rootName = r.rootName; info = Object.assign(info, { mode: 'whole→split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed }); }
+          try { const r = await splitRead(); rootName = r.rootName; info = Object.assign(info, { mode: 'whole→split', products: r.products, withGeo: r.withGeo, occurrences: r.occurrences, failed: r.failed }); }
           catch (e) { logLine('Zerlegen nicht möglich: ' + (e && e.message || e)); parts = []; }
         } else {
           if (!res || !res.success) throw new Error('Die STEP-Datei konnte nicht gelesen werden.');

@@ -223,6 +223,7 @@ function initWorker() {
     worker.onmessage = (e) => {
       const m = e.data; const p = pending.get(m.id); if (!p) return;
       if (m.type === 'progress') p.onProgress?.(m.phase, m.value);
+      else if (m.type === 'log') diag('Leser: ' + m.line);
       else if (m.type === 'done') { pending.delete(m.id); p.resolve(m.result); }
       else if (m.type === 'error') { pending.delete(m.id); p.reject(new Error(m.message)); }
     };
