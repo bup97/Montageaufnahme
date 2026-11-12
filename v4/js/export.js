@@ -76,7 +76,9 @@ const Export = (() => {
   function bom(project) {
     const map = new Map();
     project.steps.forEach((s, i) => (s.materials || []).forEach(m => {
-      const key = (m.number || '').toUpperCase().trim(); if (!key) return;
+      const no = (m.number || '').toUpperCase().trim(); if (!no) return;
+      // gleiche Nummer mit unterschiedlicher Bezeichnung (z. B. Kabellängen) bleibt getrennt
+      const key = no + '|' + String(m.description || '').trim().replace(/\s+/g, ' ').toLowerCase();
       const e = map.get(key) || { number: m.number.trim(), description: '', quantity: 0, steps: [] };
       e.quantity += Number(m.quantity) || 0;
       if (!e.description && m.description) e.description = m.description;

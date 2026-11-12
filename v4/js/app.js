@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.7.0';
+const VERSION = '5.7.1';
 window.APP_VERSION = VERSION;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -578,7 +578,25 @@ function warnHTML(s, n) {
 }
 
 function matHistory() { try { return JSON.parse(localStorage.getItem('fw4.mat') || '{}'); } catch (e) { return {}; } }
-function rememberMat(m) { const h = matHistory(); h[m.number.toUpperCase()] = { number: m.number, description: m.description || h[m.number.toUpperCase()]?.description || '' }; const k = Object.keys(h); if (k.length > 800) delete h[k[0]]; localStorage.setItem('fw4.mat', JSON.stringify(h)); }
+// Je Artikelnummer werden ALLE verwendeten Bezeichnungen gemerkt (z. B. „Kabel schwarz (53 cm)“ und „(34 cm)“)
+const normDe = (d) => String(d || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function matVariants(h) { if (!h) return []; const v = h.variants || []; return v.length ? v : (h.description ? [h.description] : []); }
+function rememberMat(m) {
+  const h = matHistory(), key = m.number.toUpperCase(), old = h[key];
+  const variants = matVariants(old).filter(d => normDe(d) !== normDe(m.description));
+  if (m.description) variants.unshift(m.description);
+  h[key] = { number: m.number, description: variants[0] || '', variants: variants.slice(0, 15) };
+  const k = Object.keys(h); if (k.length > 800) delete h[k[0]];
+  try { localStorage.setItem('fw4.mat', JSON.stringify(h)); } catch (e) {}
+}
+// Artikelnummer eingegeben/gescannt: eine bekannte Bezeichnung → eintragen; mehrere → zur Auswahl anbieten
+function suggestDesc(no) {
+  const de = $('#m-de'), dl = $('#mde-h'); if (!de) return;
+  const v = matVariants(matHistory()[String(no || '').trim().toUpperCase()]);
+  if (dl) dl.innerHTML = v.map(d => `<option value="${esc(d)}"></option>`).join('');
+  if (v.length === 1 && !de.value) de.value = v[0];
+  de.placeholder = v.length > 1 ? `${v.length} Bezeichnungen bekannt – auswählen oder neu eingeben` : 'z. B. Schraube M6×20';
+}
 
 function tabBody(tab, s, n) {
   if (tab === 'material') {
@@ -586,9 +604,9 @@ function tabBody(tab, s, n) {
     return `<div class="card stack">
       <button class="btn block" data-act="scan" style="min-height:56px">▦ Barcode / QR scannen</button>
       <div><label class="f" for="m-no">Artikelnummer</label><input id="m-no" list="mat-h" inputmode="text" autocomplete="off" autocapitalize="characters" placeholder="z. B. 3602-010-00011">
-        <datalist id="mat-h">${Object.values(h).map(m => `<option value="${esc(m.number)}">${esc(m.description)}</option>`).join('')}</datalist></div>
+        <datalist id="mat-h">${Object.values(h).map(m => `<option value="${esc(m.number)}">${esc(matVariants(m).join(' | '))}</option>`).join('')}</datalist></div>
       <div class="row" style="align-items:flex-end">
-        <div class="grow"><label class="f" for="m-de">Bezeichnung <span class="tiny">(optional)</span></label><input id="m-de" autocomplete="off" placeholder="z. B. Schraube M6×20"></div>
+        <div class="grow"><label class="f" for="m-de">Bezeichnung <span class="tiny">(optional)</span></label><input id="m-de" list="mde-h" autocomplete="off" placeholder="z. B. Schraube M6×20"><datalist id="mde-h"></datalist></div>
         <div><label class="f">Menge</label><div class="qty"><button data-act="mq:-1" aria-label="weniger">−</button><input id="m-q" type="number" inputmode="numeric" min="1" value="1"><button data-act="mq:1" aria-label="mehr">+</button></div></div>
       </div>
       <button class="btn primary block" data-act="mat-add">Material hinzufügen</button>
@@ -674,8 +692,10 @@ async function addMaterial() {
   if (!no) { $('#m-no').focus(); toast('Bitte Artikelnummer eingeben oder scannen.'); return; }
   const q = Math.max(1, parseInt($('#m-q').value, 10) || 1);
   const de = $('#m-de').value.trim();
-  const ex = s.materials.find(m => m.number.toUpperCase() === no.toUpperCase());
-  if (ex) { ex.quantity += q; if (!ex.description && de) ex.description = de; toast(`Menge von ${ex.number} erhöht auf ${ex.quantity}`); }
+  // gleiche Nummer UND gleiche Bezeichnung → Menge erhöhen; andere Bezeichnung (z. B. andere Kabellänge) → eigene Zeile
+  const same = s.materials.filter(m => m.number.toUpperCase() === no.toUpperCase());
+  const ex = same.find(m => normDe(m.description) === normDe(de)) || (!de && same.length === 1 ? same[0] : null) || (de ? same.find(m => !m.description) : null);
+  if (ex) { ex.quantity += q; if (!ex.description && de) ex.description = de; toast(`Menge von ${ex.number}${ex.description ? ' (' + ex.description + ')' : ''} erhöht auf ${ex.quantity}`); }
   else s.materials.push({ number: no, description: de, quantity: q });
   rememberMat({ number: no, description: de });
   touch(); renderStep();
@@ -961,7 +981,7 @@ document.addEventListener('click', async e => {
     case 'sdel-cur': { const st = curStep(); return st && deleteStep(st); }
     case 'scan': {
       const code = await Media.scan(); if (!code) return;
-      $('#m-no').value = code; const h = matHistory()[code.toUpperCase()]; if (h && !$('#m-de').value) $('#m-de').value = h.description;
+      $('#m-no').value = code; suggestDesc(code);
       toast('Gescannt: ' + code); $('#m-q').focus(); $('#m-q').select(); return;
     }
     case 'mq': { const q = $('#m-q'); q.value = Math.max(1, (parseInt(q.value, 10) || 1) + +x); return; }
@@ -1010,7 +1030,7 @@ document.addEventListener('change', e => {
   if (e.target.dataset.f && e.target.dataset.f.startsWith('materials.') && e.target.dataset.f.endsWith('description')) {
     const s = curStep(); const i = +e.target.dataset.f.split('.')[1]; rememberMat(s.materials[i]);
   }
-  if (e.target.id === 'm-no') { const h = matHistory()[e.target.value.trim().toUpperCase()]; if (h && h.description && !$('#m-de').value) $('#m-de').value = h.description; }
+  if (e.target.id === 'm-no') suggestDesc(e.target.value);
   if (e.target.dataset.f === 'isScanStep') renderStep();
 });
 document.addEventListener('keydown', e => {
