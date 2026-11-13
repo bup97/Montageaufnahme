@@ -101,7 +101,7 @@ const PptxImport = (() => {
       if (!titleEl) { skipped++; continue; }
 
       // Label-Folien erzeugt die App selbst – nur den Bereich daraus ablesen
-      if (/^Label\b/i.test(titleEl.t)) {
+      if (/^(Schritt\s*\d+\s*[:.\-–]\s*)?Label\b/i.test(titleEl.t)) {
         labels++;
         if (!info.productionArea) {
           info.productionArea = 'funkwerk';

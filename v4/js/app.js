@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.7.2';
+const VERSION = '5.7.3';
 window.APP_VERSION = VERSION;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -403,7 +403,7 @@ function renderProject() {
   const p = S.P;
   const labels = Layout.labelsFor(p);
   const labelCard = l => `<div class="scard label"><span class="num">🏷</span><div class="body" style="cursor:default"><div class="t">${esc(l.title)}</div><div class="tiny">automatische Label-Folie</div></div></div>`;
-  const totalWarn = p.steps.reduce((a, s, i) => a + (warningsOf(s, i + 1).length ? 1 : 0), 0);
+  const totalWarn = p.steps.reduce((a, s, i) => a + (warningsOf(s, Layout.stepNo(p, i)).length ? 1 : 0), 0);
   $('#app').innerHTML = `
   <header class="top"><div class="top-in">
     <button class="icon-btn" data-act="home" aria-label="Zurück">‹</button>
@@ -417,13 +417,13 @@ function renderProject() {
     <div class="steps">
       ${labels.start.map(labelCard).join('')}
       ${p.steps.map((s, i) => {
-        const w = warningsOf(s, i + 1).length;
+        const w = warningsOf(s, Layout.stepNo(p, i)).length;
         const tid = s.photoIds[0];
         return `<div class="scard">
-          <span class="num">${i + 1}</span>
+          <span class="num">${Layout.stepNo(p, i)}</span>
           <div class="thumb" style="${tid && S.thumbs.get(tid) ? `background-image:url('${S.thumbs.get(tid)}')` : ''}" data-act="step" data-id="${s.id}">${tid ? '' : '📷'}</div>
           <div class="body" data-act="step" data-id="${s.id}">
-            <div class="t">${esc(Layout.stepTitle(s, i + 1))}</div>
+            <div class="t">${esc(Layout.stepTitle(s, Layout.stepNo(p, i)))}</div>
             <div class="chips">
               <span class="chip">📷 ${s.photoIds.length}</span><span class="chip">📦 ${s.materials.length}</span>
               ${Layout.stepTools(s).length ? '<span class="chip">🔧</span>' : ''}${s.cables.some(c => c.designation || c.from || c.to) ? '<span class="chip">🔌</span>' : ''}
@@ -431,7 +431,7 @@ function renderProject() {
             </div>
           </div>
           <div class="mv"><button data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
-          <button class="x sdel" data-act="sdel" data-id="${s.id}" aria-label="Schritt ${i + 1} löschen" title="Schritt löschen">🗑</button>
+          <button class="x sdel" data-act="sdel" data-id="${s.id}" aria-label="Schritt ${Layout.stepNo(p, i)} löschen" title="Schritt löschen">🗑</button>
         </div>`;
       }).join('')}
       ${labels.end.map(labelCard).join('')}
@@ -449,24 +449,24 @@ function renderProject() {
 /* PC: jeder Schritt als große Folienvorschau */
 const isDesk = () => matchMedia('(min-width:1040px)').matches;
 function projectGrid(p, labels) {
-  const lab = l => `<div class="pslide label">${slideHTML(Layout.layoutLabelSlide(l))}<div class="cap"><span class="chip">🏷 Label-Folie</span><span class="tiny">wird automatisch erzeugt</span></div></div>`;
+  const lab = (l, n) => `<div class="pslide label">${slideHTML(Layout.layoutLabelSlide(l, n))}<div class="cap"><span class="chip">🏷 Label-Folie</span><span class="tiny">wird automatisch erzeugt</span></div></div>`;
   return `<div class="pgrid">
-    ${labels.start.map(lab).join('')}
+    ${labels.start.map((l, j) => lab(l, j + 1)).join('')}
     ${p.steps.map((s, i) => {
-      const lay = Layout.layoutStepSlide(s, i + 1, metasOf(s));
+      const lay = Layout.layoutStepSlide(s, Layout.stepNo(p, i), metasOf(s));
       return `<div class="pslide">
         <div data-act="step" data-id="${s.id}" class="pslide-click" title="Schritt bearbeiten">${slideHTML(lay)}</div>
-        <div class="cap"><b class="n">${i + 1}</b><span class="t">${esc(Layout.stepTitle(s, i + 1))}</span>
+        <div class="cap"><b class="n">${Layout.stepNo(p, i)}</b><span class="t">${esc(Layout.stepTitle(s, Layout.stepNo(p, i)))}</span>
           ${s.isScanStep ? '<span class="chip scan">Scan</span>' : ''}${lay.warnings.length ? `<span class="chip warn" title="${esc(lay.warnings.join(' '))}">⚠ prüfen</span>` : ''}
           <span class="grow"></span>
-          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne" aria-label="Schritt ${i + 1} nach vorne">◀</button>
-          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten" aria-label="Schritt ${i + 1} nach hinten">▶</button>
-          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten" aria-label="Schritt ${i + 1} bearbeiten">✎</button>
-          <button class="icon-btn sm sdel" data-act="sdel" data-id="${s.id}" title="Schritt löschen" aria-label="Schritt ${i + 1} löschen">🗑</button></div>
+          <button class="icon-btn sm" data-act="up" data-id="${s.id}" ${i === 0 ? 'disabled' : ''} title="Nach vorne" aria-label="Schritt ${Layout.stepNo(p, i)} nach vorne">◀</button>
+          <button class="icon-btn sm" data-act="down" data-id="${s.id}" ${i === p.steps.length - 1 ? 'disabled' : ''} title="Nach hinten" aria-label="Schritt ${Layout.stepNo(p, i)} nach hinten">▶</button>
+          <button class="icon-btn sm" data-act="step" data-id="${s.id}" title="Bearbeiten" aria-label="Schritt ${Layout.stepNo(p, i)} bearbeiten">✎</button>
+          <button class="icon-btn sm sdel" data-act="sdel" data-id="${s.id}" title="Schritt löschen" aria-label="Schritt ${Layout.stepNo(p, i)} löschen">🗑</button></div>
       </div>`;
     }).join('')}
     <button class="pslide add" data-act="add-step"><span>+</span>Schritt hinzufügen</button>
-    ${labels.end.map(lab).join('')}
+    ${labels.end.map((l, j) => lab(l, labels.start.length + p.steps.length + j + 1)).join('')}
   </div>`;
 }
 
@@ -520,10 +520,10 @@ addEventListener('resize', () => {
 function renderSlides() {
   const p = S.P, labels = Layout.labelsFor(p);
   const items = [
-    { name: 'Titelfolie', lay: Layout.layoutTitleSlide(p, p.steps.length) },
-    ...labels.start.map(l => ({ name: 'Label', lay: Layout.layoutLabelSlide(l) })),
-    ...p.steps.map((s, i) => ({ name: `Schritt ${i + 1}`, lay: Layout.layoutStepSlide(s, i + 1, metasOf(s)), id: s.id })),
-    ...labels.end.map(l => ({ name: 'Label', lay: Layout.layoutLabelSlide(l) }))];
+    { name: 'Titelfolie', lay: Layout.layoutTitleSlide(p, Layout.totalSteps(p)) },
+    ...labels.start.map((l, j) => ({ name: `Schritt ${j + 1} (Label)`, lay: Layout.layoutLabelSlide(l, j + 1) })),
+    ...p.steps.map((s, i) => ({ name: `Schritt ${Layout.stepNo(p, i)}`, lay: Layout.layoutStepSlide(s, Layout.stepNo(p, i), metasOf(s)), id: s.id })),
+    ...labels.end.map((l, j) => ({ name: `Schritt ${labels.start.length + p.steps.length + j + 1} (Label)`, lay: Layout.layoutLabelSlide(l, labels.start.length + p.steps.length + j + 1) }))];
   $('#app').innerHTML = `
   <header class="top"><div class="top-in"><button class="icon-btn" data-act="back-project" aria-label="Zurück">‹</button>
     <div class="grow"><h1>Folien</h1><div class="sub">${items.length} Folien · so wird die PowerPoint aussehen</div></div></div></header>
@@ -540,7 +540,7 @@ const TABS = [['material', 'Material'], ['anweisung', 'Anweisung'], ['fotos', 'F
 
 function renderStep() {
   const p = S.P, s = curStep(); if (!s) return go(`#/p/${p.id}`);
-  const i = stepIndex(s.id), n = i + 1, tab = S.route.tab;
+  const i = stepIndex(s.id), n = Layout.stepNo(S.P, i), tab = S.route.tab;
   const counts = { material: s.materials.length, anweisung: (s.instructions.trim() ? 1 : 0), fotos: s.photoIds.length, vorschau: warningsOf(s, n).length };
   const wide = matchMedia('(min-width:1040px)').matches;
   const tabIdx = TABS.findIndex(t => t[0] === tab);
@@ -553,7 +553,7 @@ function renderStep() {
   $('#app').innerHTML = `
   <header class="top"><div class="top-in">
     <button class="icon-btn" data-act="back-project" aria-label="Zur Übersicht">‹</button>
-    <div class="grow" style="min-width:0"><h1>Schritt ${n} <span class="muted" style="font-weight:500">von ${p.steps.length}</span></h1><div class="sub">${esc(pTitle(p))}</div></div>
+    <div class="grow" style="min-width:0"><h1>Schritt ${n} <span class="muted" style="font-weight:500">von ${Layout.totalSteps(p)}</span></h1><div class="sub">${esc(pTitle(p))}</div></div>
     <button class="icon-btn sdel" data-act="sdel-cur" aria-label="Schritt löschen" title="Schritt löschen">🗑</button>
     <button class="icon-btn" data-act="smenu" aria-label="Mehr">⋯</button>
   </div></header>
@@ -669,7 +669,7 @@ function tabBody(tab, s, n) {
 function refreshPreview() {
   clearTimeout(S.previewTimer);
   S.previewTimer = setTimeout(() => {
-    const s = curStep(); if (!s) return; const n = stepIndex(s.id) + 1;
+    const s = curStep(); if (!s) return; const n = Layout.stepNo(S.P, stepIndex(s.id));
     const lay = Layout.layoutStepSlide(s, n, metasOf(s));
     ['side', 'tab'].forEach(k => {
       const pv = $(`#${k}-prev`); if (pv) { pv.innerHTML = slideHTML(lay); fitSlides(pv); }
@@ -718,7 +718,7 @@ function deleteStep(s) {
   const p = S.P, i = stepIndex(s.id);
   p.steps.splice(i, 1); touch();
   const ids = [...s.photoIds];
-  toast(`Schritt ${i + 1} gelöscht`, {
+  toast(`Schritt ${Layout.stepNo(p, i)} gelöscht`, {
     label: 'Rückgängig', run: () => { if (S.P && S.P.id === p.id) { p.steps.splice(i, 0, s); touch(); route(); } },
     onTimeout: () => { if (!(S.P && S.P.steps.includes(s))) DB.deletePhotos(ids); }
   });

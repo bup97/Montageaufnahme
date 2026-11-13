@@ -57,6 +57,9 @@ function countLines(text, w, pt, bold) {
 function textH(text, w, pt, bold) { return countLines(text, w, pt, bold) * lineH(pt) + 0.12; }
 
 /* ---------- Ableitungen aus einem Schritt ---------- */
+/* Nummerierung: automatische Label-Schritte zählen mit (Start-Labels vorne, End-Labels hinten) */
+function stepNo(project, i) { return i + 1 + labelsFor(project).start.length; }
+function totalSteps(project) { const l = labelsFor(project); return project.steps.length + l.start.length + l.end.length; }
 function stepTitle(step, n) {
   if (step.title && step.title.trim()) return step.title.trim();
   const first = (step.instructions || '').split('\n')[0].trim();
@@ -256,9 +259,9 @@ function layoutStepSlide(step, n, photos /* [{id,w,h}] */) {
   return { els, warnings: warnings.concat(checkFit(els, bottom, false)) };
 }
 
-function layoutLabelSlide(label) {
+function layoutLabelSlide(label, n) {
   const els = [];
-  commonTop(els, label.title);
+  commonTop(els, n ? `Schritt ${n}: ${label.title}` : label.title);
   if (label.img) {
     const h = 5, w = h * 0.8;
     els.push({ type: 'image', src: 'label', label: label.key, x: COL.left + (COL.w - w) / 2, y: COL.top + (COL.h - h) / 2, w, h });
@@ -300,5 +303,5 @@ function labelsFor(p) {
   return p.type === 'vormontage' ? { start: LABELS.vormontage, end: [] } : { start: [], end: LABELS.endmontage };
 }
 
-window.Layout = { SLIDE_W, SLIDE_H, layoutStepSlide, layoutLabelSlide, layoutTitleSlide, labelsFor, areaLabel,
+window.Layout = { SLIDE_W, SLIDE_H, layoutStepSlide, layoutLabelSlide, layoutTitleSlide, labelsFor, areaLabel, stepNo, totalSteps,
   stepTitle, stepTools, stepHint, instructionBullets, LABELS };

@@ -62,10 +62,12 @@ const Export = (() => {
     const metas = {};
     for (const s of project.steps) metas[s.id] = await Promise.all((s.photoIds || []).map(async id => { const ph = await getPhoto(id); return ph ? { id, w: ph.w, h: ph.h } : null; })).then(a => a.filter(Boolean));
 
-    draw(pres, pres.addSlide(), Layout.layoutTitleSlide(project, project.steps.length).els, imgs);
-    labels.start.forEach(l => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l).els, imgs));
-    project.steps.forEach((s, i) => draw(pres, pres.addSlide(), Layout.layoutStepSlide(s, i + 1, metas[s.id]).els, imgs));
-    labels.end.forEach(l => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l).els, imgs));
+    // Label-Schritte zählen mit: Start-Labels 1…k, dann die Arbeitsschritte, dann die End-Labels
+    const k = labels.start.length;
+    draw(pres, pres.addSlide(), Layout.layoutTitleSlide(project, Layout.totalSteps(project)).els, imgs);
+    labels.start.forEach((l, j) => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l, j + 1).els, imgs));
+    project.steps.forEach((s, i) => draw(pres, pres.addSlide(), Layout.layoutStepSlide(s, i + 1 + k, metas[s.id]).els, imgs));
+    labels.end.forEach((l, j) => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l, k + project.steps.length + j + 1).els, imgs));
 
     const blob = await pres.write({ outputType: 'blob' });
     return { blob, name: fileBase(project, 'Montageanleitung') + '.pptx',
