@@ -525,6 +525,93 @@ async function makeUserUnit(ids) {
   afterChange(); S.sel = Math.max(0, S.steps.indexOf(target)); refreshSel();
   toast(`Baugruppe „${r.name}“ gebildet (${ids.length} Teile) – in der Stückliste nur noch eine Zeile`);
 }
+
+// Neue Baugruppe oder zu einer bestehenden hinzufügen?
+function askUnitTarget(n) {
+  const list = unitList();
+  if (!list.length) return Promise.resolve('new');
+  return new Promise(res => {
+    const ov = document.createElement('div'); ov.className = 'cad-modal';
+    ov.innerHTML = `<div class="cad-modal-box" role="dialog" aria-modal="true" aria-labelledby="cad-ut-h">
+      <h3 id="cad-ut-h" style="margin:0 0 10px">${n} Teil${n === 1 ? '' : 'e'} …</h3>
+      <div class="stack" style="gap:6px">
+        <button class="btn block" data-t="new">📦 Neue Baugruppe bilden</button>
+        <div class="tiny" style="margin-top:4px">… oder zu einer bestehenden Baugruppe hinzufügen:</div>
+        ${list.map(g => `<button class="btn block ghost" data-t="${esc(g.key)}" style="justify-content:flex-start;text-align:left">${g.kind === 'user' ? '📦' : '🧩'} ${esc(g.name)} <span class="tiny muted">&nbsp;${g.ids.length} Teile${(S.meta.children || {})[g.key] ? ' · hat eigene Anleitung' : ''}</span></button>`).join('')}
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn ghost" data-t="">Abbrechen</button></div></div>`;
+    document.body.appendChild(ov);
+    const done = (v) => { ov.remove(); res(v); };
+    ov.addEventListener('click', e => { const x = e.target.closest('[data-t]'); if (x) done(x.dataset.t || null); else if (e.target === ov) done(null); });
+    ov.addEventListener('keydown', e => { if (e.key === 'Escape') done(null); });
+    setTimeout(() => ov.querySelector('[data-t]')?.focus(), 30);
+  });
+}
+async function unitAction(ids) {
+  ids = [...new Set(ids)].filter(id => S.parts[id]);
+  if (!ids.length) return toast('Keine Teile gewählt');
+  const t = await askUnitTarget(ids.length);
+  if (!t) return;
+  if (t === 'new') return makeUserUnit(ids);
+  return addToUnit(t, ids);
+}
+// Weitere Teile (bzw. ganze Schritte) nachträglich in eine Baugruppe aufnehmen
+async function addToUnit(key, ids) {
+  const g = (S.units || []).find(x => x.key === key); if (!g) return;
+  ids = ids.filter(id => !g.ids.includes(id)); if (!ids.length) return toast('Diese Teile gehören schon zur Baugruppe');
+  // CAD-Unterbaugruppe wird dabei zur eigenen Baugruppe (gleicher Name, gleicher Schlüssel)
+  S.meta.userUnits = (S.meta.userUnits || []).map(u => Object.assign({}, u, { ids: u.ids.filter(x => !ids.includes(x)) })).filter(u => u.ids.length > 1 || u.key === key);
+  let u = S.meta.userUnits.find(x => x.key === key);
+  if (!u) { u = { key, name: g.name, art: unitArt(g), ids: g.ids.slice() }; S.meta.userUnits.push(u); }
+  u.ids = [...new Set(u.ids.concat(ids))];
+  // andere Einheiten geben die Teile ab
+  S.units = (S.units || []).map(x => x.key === key ? x : Object.assign({}, x, { ids: x.ids.filter(id => !ids.includes(id)) })).filter(x => x.key === key || x.ids.length > 1);
+  const srcSteps = new Map();   // für die eigene Anleitung: Teile je Herkunftsschritt
+  const target = S.steps.find(st => st.kind !== 'wire' && st.parts.includes(g.main));
+  for (const id of ids) {
+    const f = S.steps.find(st => st.parts.includes(id));
+    if (f) { if (!srcSteps.has(f)) srcSteps.set(f, []); srcSteps.get(f).push(id); }
+    if (f && f !== target) f.parts = f.parts.filter(x => x !== id);
+    if (target && !target.parts.includes(id)) target.parts.push(id);
+  }
+  g.kind = 'user'; g.art = u.art; g.ids = u.ids.slice();
+  if (target) { target.unit = g.name; target.main = g.main; }
+  picked.clear(); stepSel.clear();
+  const child = (S.meta.children || {})[key];
+  afterChange(); if (target) { S.sel = Math.max(0, S.steps.indexOf(target)); refreshSel(); }
+  if (child) {
+    const groups = [...srcSteps.entries()].map(([st, list]) => ({ ids: list, dir: st.dir, title: st.auto ? '' : st.title, text: st.auto ? '' : st.text, tools: st.tools || '' }));
+    const n = await appendToChild(child, groups);
+    toast(`${ids.length} Teil${ids.length === 1 ? '' : 'e'} zu „${g.name}“ hinzugefügt – in ihrer Anleitung als ${n} neue${n === 1 ? 'r' : ''} Schritt${n === 1 ? '' : 'e'} am Ende`);
+  } else toast(`${ids.length} Teil${ids.length === 1 ? '' : 'e'} zu „${g.name}“ hinzugefügt`);
+}
+// Teile an eine schon angelegte Baugruppen-Anleitung anhängen (Geometrie + je Herkunftsschritt ein neuer Schritt am Ende)
+async function appendToChild(childId, groups) {
+  const rec = await CDB.get(childId), geo = await CDB.geom(childId); if (!rec || !geo) return 0;
+  const st = rec.state, base = st.parts.length;
+  const chunks = [geo.blob], layout = geo.layout.slice();
+  const add = groups.flatMap(gr => gr.ids);
+  const newId = new Map(add.map((id, i) => [id, base + i]));
+  for (const id of add) {
+    const p = S.parts[id], pos = p.geom.getAttribute('position').array, nrm = p.geom.getAttribute('normal')?.array || new Float32Array(0), idx = p.geom.getIndex().array;
+    layout.push([pos.length, nrm.length, idx.length]); chunks.push(pos, nrm, idx);
+    st.parts.push({ id: newId.get(id), name: p.name, asm: [] });
+    st.boxVol = st.boxVol || []; st.boxVol[newId.get(id)] = S.boxVol[id] || 0;
+    st.contacts = st.contacts || []; st.contacts.push([newId.get(id), []]);
+    // Stückliste der Baugruppe ergänzen
+    const bi = S.match[p.name];
+    if (st.bom && bi >= 0 && st.match[p.name] === undefined) {
+      const row = S.bom.rows[bi]; let j = st.bom.rows.findIndex(r => r.art === row.art && r.name === row.name);
+      if (j < 0) { j = st.bom.rows.length; st.bom.rows.push(row); }
+      st.match[p.name] = j;
+    } else if (st.match && st.match[p.name] === undefined) st.match[p.name] = -1;
+  }
+  for (const gr of groups) st.steps.push({ uid: rid(), parts: gr.ids.map(id => newId.get(id)), dir: gr.dir ?? -1, kind: 'part', title: gr.title || '', text: gr.text || '', note: '', tools: gr.tools || '', auto: !gr.title, cam: null, added: true });
+  await CDB.putGeom({ id: childId, layout, blob: new Blob(chunks) });
+  await CDB.put(Object.assign({}, rec, { savedAt: Date.now(), nParts: st.parts.length, nSteps: st.steps.length, state: st }));
+  return groups.length;
+}
+
 async function editUserUnit(key) {
   const u = (S.meta.userUnits || []).find(x => x.key === key); if (!u) return;
   const r = await askUnit('Baugruppe bearbeiten', u.name, u.art); if (!r) return;
@@ -589,7 +676,7 @@ function unitsPanel() {
   const ch = S.meta.children || {};
   return `<div class="sect">Baugruppen</div>
   <div class="card stack">
-    <div class="tiny">Baugruppen erscheinen in der Stückliste als <b>eine</b> Zeile. Eigene Baugruppen bildest du, indem du im 3D Teile mit Strg + Klick wählst (oder links mehrere Schritte) und „📦 Baugruppe bilden“ antippst.</div>
+    <div class="tiny">Baugruppen erscheinen in der Stückliste als <b>eine</b> Zeile. Eigene Baugruppen bildest du, indem du im 3D Teile mit Strg + Klick wählst (oder links mehrere Schritte) und „📦 Baugruppe …“ antippst. Dort lassen sich auch nachträglich weitere Teile oder Schritte zu einer bestehenden Baugruppe hinzufügen – hat sie schon eine eigene Anleitung, kommen sie dort als neue Schritte ans Ende.</div>
     ${list.length ? `<div class="cad-unitlist">${list.map(g => `<div class="cad-unit">
         <div style="min-width:0"><b>${g.kind === 'user' ? '📦' : '🧩'} ${esc(g.name)}</b> <span class="tiny muted">${g.ids.length} Teile${unitArt(g) ? ' · ' + esc(unitArt(g)) : ''}${g.kind === 'sub' ? ' · aus dem CAD' : ''}</span>
           ${ch[g.key] ? '<div class="tiny" style="color:var(--ok)">✓ eigene Anleitung angelegt</div>' : ''}</div>
@@ -695,6 +782,7 @@ async function resumeSession(id) {
     S.stepFile = null; S.bomFile = null; S.stepName = rec.stepName; S.stepSize = rec.stepSize; S.bomName = rec.bomName;
     S.sessionId = id; S.takenAt = rec.takenAt || null; S.projectId = rec.projectId || null; S.workerHasParts = false;
     S.units = st.units || [];
+    if (S.steps.some(x => x.added)) { S.steps.forEach(x => { delete x.added; }); regenTexts(); }   // aus dem Hauptprojekt nachgereichte Schritte
     buildScene(); S.analyzed = true; thumbs.clear(); insTab = 'step';
     render(); histReset(); setSaveState('saved');
   } catch (e) { console.error(e); toast('Öffnen fehlgeschlagen: ' + (e.message || e)); }
@@ -807,7 +895,7 @@ function multiBar() {
       <option value="end">ans Ende</option>
       <optgroup label="direkt nach Schritt …">${S.steps.map((s, i) => stepSel.has(s.uid) ? '' : `<option value="after:${s.uid}">nach ${i + 1} – ${esc(cut(s.title || ''))}</option>`).join('')}</optgroup>
     </select><button class="btn sm primary" data-cad="multimove">Verschieben</button></div>
-    <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm" data-cad="multimerge" title="Alle Teile der gewählten Schritte in einen Schritt">Zusammenfassen</button><button class="btn sm" data-cad="multiunit" title="Alle Teile der gewählten Schritte als eine Baugruppe (eine Stücklistenzeile)">📦 Baugruppe bilden</button><button class="btn sm ghost" data-cad="multiclear">Aufheben</button></div>
+    <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm" data-cad="multimerge" title="Alle Teile der gewählten Schritte in einen Schritt">Zusammenfassen</button><button class="btn sm" data-cad="multiunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 Baugruppe …</button><button class="btn sm ghost" data-cad="multiclear">Aufheben</button></div>
     <span class="tiny muted">Strg+Klick: dazu/weg · Umschalt+Klick: Bereich · gemeinsam ziehbar</span>
   </div>`;
 }
@@ -1238,7 +1326,7 @@ function renderPickBox() {
       <optgroup label="Als neuen Schritt"><option value="new:after">→ neuer Schritt nach ${S.sel + 1}</option><option value="new:before">→ neuer Schritt vor ${S.sel + 1}</option><option value="new:end">→ neuer Schritt ganz am Ende</option></optgroup>
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
-    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button>${picked.size > 1 ? '<button class="btn sm" data-cad="pickunit" title="Gewählte Teile zu einer Baugruppe zusammenfassen">📦 Baugruppe bilden</button>' : ''}</div>
+    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button>${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
     <span class="tiny muted">Strg + Klick: weitere Teile dazu</span>`;
   box.hidden = false;
 }
@@ -1598,6 +1686,7 @@ function renderIns() {
     <button class="btn sm" data-cad="merge" ${S.sel === 0 ? 'disabled' : ''}>Mit vorherigem zusammenfassen</button>
     <button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''} title="Direkt nach dem Grundteil einordnen">⤒ An den Anfang</button>
     <button class="btn sm" data-cad="toend" ${S.sel === S.steps.length - 1 ? 'disabled' : ''}>⤓ Ans Ende</button>
+    ${unitList().length && !(st.main !== undefined && unitList().some(u => u.main === st.main)) ? '<button class="btn sm" data-cad="stepunit" title="Diesen Schritt zu einer Baugruppe hinzufügen">📦 Zu Baugruppe …</button>' : ''}
     <button class="btn sm danger" data-cad="delstep">🗑 Schritt löschen</button>
   </div>
   <p class="tiny">Tipp: Im 3D-Bild ein Teil antippen, um es in diesen Schritt zu holen. Schritte per Ziehen oder ▲▼ umsortieren.</p>`;
@@ -2449,8 +2538,9 @@ document.addEventListener('click', e => {
     case 'frame': S.meta.frame = S.meta.frame === false; el.setAttribute('aria-pressed', S.meta.frame !== false); return placeFrame();
     case 'multimove': return moveStepsTo($('#cad-multi-to', ROOT).value);
     case 'multimerge': return mergeSelected();
-    case 'multiunit': return makeUserUnit(S.steps.filter(st => stepSel.has(st.uid) && st.kind !== 'wire').flatMap(st => st.parts));
-    case 'pickunit': return makeUserUnit([...picked]);
+    case 'multiunit': return unitAction(S.steps.filter(st => stepSel.has(st.uid) && st.kind !== 'wire').flatMap(st => st.parts));
+    case 'pickunit': return unitAction([...picked]);
+    case 'stepunit': { const st = S.steps[S.sel]; return st ? unitAction(st.parts) : undefined; }
     case 'unit-edit': return editUserUnit(el.dataset.key);
     case 'unit-del': return dissolveUnit(el.dataset.key);
     case 'unit-spin': return spinOff([el.dataset.key]);
