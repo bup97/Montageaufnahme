@@ -1110,6 +1110,17 @@ function initThree() {
   renderer.domElement.addEventListener('pointerup', wirePointerUp);
   renderer.domElement.addEventListener('pointerleave', () => { if (!wireDrag && hoverDot?.visible) showHoverDot(null); });
   renderer.domElement.addEventListener('pointerup', onPick);
+  renderer.domElement.addEventListener('dblclick', e => {
+    if (pickMode || !S.analyzed) return;
+    const r = renderer.domElement.getBoundingClientRect();
+    const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
+    const hits = rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.faint), false);
+    const hit = hits.find(h => h.object.material !== mats.ghost) || hits[0]; if (!hit) return;
+    const i = S.steps.findIndex(st => st.parts.includes(hit.object.userData.id));
+    if (i < 0) return toast('Dieses Teil ist in keinem Arbeitsschritt');
+    picked.clear(); renderPickBox(); select(i); toast(`Schritt ${i + 1}: ${S.steps[i].title || ''}`);
+  });
   // Grafikspeicher knapp? Statt leerer Bilder einen verständlichen Hinweis zeigen
   renderer.domElement.addEventListener('webglcontextlost', e => { e.preventDefault(); gpuLost = true; diag('Grafikspeicher: Zeichenfläche verloren (webglcontextlost)'); showGpuHint(); });
   diag('3D gestartet: ' + gpuInfo());
@@ -1281,7 +1292,8 @@ function onPick(e) {
   const r = renderer.domElement.getBoundingClientRect();
   const v = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
   const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
-  const hit = rc.intersectObjects(pickMode && pickMode.mode === 'wire' ? endTargets(pickMode.conn, pickMode.side) : meshes.filter(m => m.visible && m.material !== mats.ghost && m.material !== mats.faint), false)[0];
+  const hits = rc.intersectObjects(pickMode && pickMode.mode === 'wire' ? endTargets(pickMode.conn, pickMode.side) : meshes.filter(m => m.visible && m.material !== mats.faint && (!pickMode || m.material !== mats.ghost)), false);
+  const hit = hits.find(h => h.object.material !== mats.ghost) || hits[0];   // durchsichtige Folgeteile nur, wenn nichts davor liegt
   if (pickMode) {
     if (!hit) return;
     if (pickMode.mode === 'wire') {             // Aderende genau setzen: Punkt + Flächenrichtung
@@ -1327,7 +1339,12 @@ function renderPickBox() {
     : `<b>${ids.length} Teile ausgewählt</b><span class="tiny">${esc([...new Set(ids.map(id => labelOf(S.parts[id])))].slice(0, 4).join(', '))}${ids.length > 4 ? ' …' : ''}</span>`;
   const cut = (t) => t.length > 28 ? t.slice(0, 27) + '…' : t;
   const curOk = cur && cur.kind !== 'wire' && !ids.every(id => cur.parts.includes(id));   // schon hier? dann „neuer Schritt“ vorschlagen
-  box.innerHTML = `${head}
+  // Zu dem Arbeitsschritt springen, in dem das Teil montiert wird
+  const stepsOf = [...new Set(ids.map(id => S.steps.findIndex(st => st.parts.includes(id))))].sort((a, b) => a - b);
+  const jump = stepsOf.length === 1 && stepsOf[0] === S.sel ? `<div class="tiny" style="margin-top:4px;color:var(--ok)">✓ wird in diesem Schritt montiert</div>`
+    : `<div class="row" style="gap:6px;margin-top:6px;flex-wrap:wrap">${stepsOf.slice(0, 5).map(i => i < 0 ? '<span class="tiny muted">nicht in der Anleitung</span>'
+        : `<button class="btn sm primary" data-cad="pickgo" data-i="${i}" title="${esc(S.steps[i].title || '')}">↪ Zu Schritt ${i + 1}</button>`).join('')}${stepsOf.length > 5 ? ' …' : ''}</div>`;
+  box.innerHTML = `${head}${jump}
     <label class="tiny" for="cad-pick-to" style="margin-top:6px">Verschieben nach</label>
     <select id="cad-pick-to">
       ${curOk ? `<option value="${S.sel}">Schritt ${S.sel + 1} (aktuell angezeigt)</option>` : ''}
@@ -1335,7 +1352,7 @@ function renderPickBox() {
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
     <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button>${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
-    <span class="tiny muted">Strg + Klick: weitere Teile dazu</span>`;
+    <span class="tiny muted">Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt</span>`;
   box.hidden = false;
 }
 // Mehrere Teile auf einmal verschieben; der angezeigte Schritt bleibt gewählt
@@ -2560,6 +2577,7 @@ document.addEventListener('click', e => {
     case 'redo': return redo();
     case 'pickmove': { const v = $('#cad-pick-to', ROOT).value; const ids = [...picked]; picked.clear(); return movePartsTo(ids, v.startsWith('new') ? v : +v); }
     case 'pickclose': picked.clear(); applyStep(S.sel); return renderPickBox();
+    case 'pickgo': { const i = +el.dataset.i; picked.clear(); renderPickBox(); return select(i); }
     case 'reseq': {
       el.disabled = true; el.textContent = 'Berechne …';
       return runSequence().then(() => { thumbs.clear(); insTab = 'step'; renderWork(); histTrack(); toast('Reihenfolge neu berechnet'); }).catch(err => toast(err.message));
