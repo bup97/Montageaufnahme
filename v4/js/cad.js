@@ -426,7 +426,10 @@ async function runSequence() {
   }
   // Unterbaugruppen und Einpressteile gehen als je EIN starres Teil in die Reihenfolge ein
   const off = new Set(S.meta.subOff || []);
-  const merge = S.meta.subJoin !== false ? subAssemblies().filter(g => !off.has(g.key)).map(g => ({ key: g.key, name: g.name, ids: g.ids })) : [];
+  const user = (S.meta.userUnits || []).filter(u => u.ids.length > 1 && u.ids.every(id => S.parts[id]));
+  const inUser = new Set(user.flatMap(u => u.ids));
+  const merge = user.map(u => ({ key: u.key, name: u.name, ids: u.ids.slice() }))
+    .concat(S.meta.subJoin !== false ? subAssemblies().filter(g => !off.has(g.key) && !g.ids.some(id => inUser.has(id))).map(g => ({ key: g.key, name: g.name, ids: g.ids })) : []);
   const pem = S.meta.pemJoin !== false ? S.parts.filter(isPem).map(p => p.id) : [];
   const r = await call({ type: 'sequence', units, upAxis: S.meta.upAxis, merge, pem }, setPhase);
   S.contacts = new Map(S.parts.map(p => [p.id, new Set()]));
@@ -439,10 +442,11 @@ async function runSequence() {
     title: '', text: '', note: '', tools: '', auto: true, cam: null,
   }));
   S.sel = 0;
-  S.units = (r.groups || []).map(g => Object.assign({}, g, { name: g.kind === 'pem' ? labelOf(S.parts[g.main]) : g.name }));
+  const userBy = new Map(user.map(u => [u.key, u]));
+  S.units = (r.groups || []).map(g => Object.assign({}, g, userBy.has(g.key) ? { kind: 'user', art: userBy.get(g.key).art } : {}, { name: g.kind === 'pem' ? labelOf(S.parts[g.main]) : g.name }));
   for (const g of S.units) {
     const st = S.steps.find(x => x.parts.includes(g.main)); if (!st) continue;
-    st.main = g.main; if (g.kind === 'sub' && st.parts.every(id => g.ids.includes(id))) st.unit = g.name;
+    st.main = g.main; if ((g.kind === 'sub' || g.kind === 'user') && st.parts.every(id => g.ids.includes(id))) st.unit = g.name;
     if (st.kind === 'fast') st.kind = 'part';
   }
   const nu = S.units.length;
@@ -469,6 +473,135 @@ function subAssemblies() {
 }
 const isPem = (p) => RX_PEM.test(p.name) || RX_PEM.test(labelOf(p));
 const unitOf = (id) => (S.units || []).find(g => g.ids.includes(id));
+
+
+// ======================= Eigene Baugruppen & Baugruppen als eigene Anleitung =======================
+// Eigene Baugruppe: beliebige Teile werden zu EINER Einheit (ein Schritt, eine Stücklistenzeile mit eigener Art.-Nr.).
+// Entkoppeln: eine Baugruppe (aus dem CAD oder selbst gebildet) wird ein eigenes Projekt mit eigenen Arbeitsschritten;
+// im Hauptprojekt bleibt sie ein Schritt mit einer Zeile.
+function askUnit(title, name, art) {
+  return new Promise(res => {
+    const bomRows = S.bom ? S.bom.rows : [];
+    const ov = document.createElement('div'); ov.className = 'cad-modal';
+    ov.innerHTML = `<div class="cad-modal-box" role="dialog" aria-modal="true" aria-labelledby="cad-mu-h">
+      <h3 id="cad-mu-h" style="margin:0 0 10px">${esc(title)}</h3>
+      <label class="f" for="cad-mu-n">Name der Baugruppe</label><input id="cad-mu-n" value="${esc(name || '')}" placeholder="z. B. Blech links mit Einpressmuttern">
+      <label class="f" for="cad-mu-a" style="margin-top:8px">Artikelnummer (für die Stückliste)</label><input id="cad-mu-a" value="${esc(art || '')}" list="cad-mu-l" placeholder="optional">
+      <datalist id="cad-mu-l">${bomRows.map(b => `<option value="${esc(b.art)}">${esc(b.pos + ' · ' + b.name)}</option>`).join('')}</datalist>
+      <div class="row" style="gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn ghost" data-x="0">Abbrechen</button><button class="btn primary" data-x="1">Übernehmen</button></div></div>`;
+    document.body.appendChild(ov);
+    const n = ov.querySelector('#cad-mu-n'), a = ov.querySelector('#cad-mu-a');
+    a.addEventListener('change', () => { const b = bomRows.find(r => r.art === a.value); if (b && (!n.value || n.value === name)) n.value = b.name; });
+    const done = (ok) => { ov.remove(); res(ok ? { name: n.value.trim() || name || 'Baugruppe', art: a.value.trim() } : null); };
+    ov.addEventListener('click', e => { const x = e.target.closest('[data-x]'); if (x) done(x.dataset.x === '1'); else if (e.target === ov) done(false); });
+    ov.addEventListener('keydown', e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); });
+    setTimeout(() => { n.focus(); n.select(); }, 30);
+  });
+}
+const unitArt = (g) => g.art || (bomByName(g.name) || {}).art || '';
+async function makeUserUnit(ids) {
+  ids = [...new Set(ids)].filter(id => S.parts[id]);
+  if (ids.length < 2) return toast('Bitte mindestens zwei Teile wählen');
+  const main = ids.slice().sort((a, b) => (S.boxVol[b] || 0) - (S.boxVol[a] || 0))[0];
+  const r = await askUnit('Baugruppe bilden (' + ids.length + ' Teile)', labelOf(S.parts[main]) + ' (Baugruppe)', '');
+  if (!r) return;
+  // andere eigene Baugruppen verlieren diese Teile
+  S.meta.userUnits = (S.meta.userUnits || []).map(u => Object.assign({}, u, { ids: u.ids.filter(x => !ids.includes(x)) })).filter(u => u.ids.length > 1);
+  const key = 'u' + rid();
+  S.meta.userUnits.push({ key, name: r.name, art: r.art, ids: ids.slice() });
+  // Schritt: dort, wo das letzte der Teile montiert wird – die Baugruppe bekommt ihn für sich allein
+  const idxOf = (id) => S.steps.findIndex(st => st.kind !== 'wire' && st.parts.includes(id));
+  let ti = Math.max(...ids.map(idxOf)); let target = ti >= 0 ? S.steps[ti] : null;
+  if (!target || target.parts.some(id => !ids.includes(id))) {
+    const own = { uid: rid(), parts: [], dir: target ? target.dir : -1, kind: 'part', title: '', text: '', note: '', tools: '', auto: true, cam: null };
+    S.steps.splice(target ? S.steps.indexOf(target) + 1 : S.steps.length, 0, own); target = own;
+  }
+  for (const id of ids) { const f = S.steps.find(st => st.parts.includes(id)); if (f && f !== target) f.parts = f.parts.filter(x => x !== id); if (!target.parts.includes(id)) target.parts.push(id); }
+  if (target.kind === 'fast' || target.kind === 'sub') target.kind = 'part';
+  S.units = (S.units || []).filter(g => !g.ids.some(x => ids.includes(x)));
+  S.units.push({ kind: 'user', key, name: r.name, art: r.art, ids: ids.slice(), main });
+  target.unit = r.name; target.main = main; target.auto = true; delete target.matVis;
+  picked.clear(); stepSel.clear();
+  afterChange(); S.sel = Math.max(0, S.steps.indexOf(target)); refreshSel();
+  toast(`Baugruppe „${r.name}“ gebildet (${ids.length} Teile) – in der Stückliste nur noch eine Zeile`);
+}
+async function editUserUnit(key) {
+  const u = (S.meta.userUnits || []).find(x => x.key === key); if (!u) return;
+  const r = await askUnit('Baugruppe bearbeiten', u.name, u.art); if (!r) return;
+  u.name = r.name; u.art = r.art;
+  const g = (S.units || []).find(x => x.key === key); if (g) { g.name = r.name; g.art = r.art; }
+  S.steps.forEach(st => { if (g && st.main === g.main && st.unit) st.unit = r.name; });
+  afterChange(); renderIns();
+}
+function dissolveUnit(key) {
+  S.meta.userUnits = (S.meta.userUnits || []).filter(u => u.key !== key);
+  const g = (S.units || []).find(x => x.key === key);
+  S.units = (S.units || []).filter(x => x.key !== key);
+  if (g) S.steps.forEach(st => { if (st.main === g.main) { delete st.unit; delete st.main; } });
+  afterChange(); renderIns(); toast('Baugruppe aufgelöst – die Teile stehen wieder einzeln in der Stückliste');
+}
+function unitList() { return (S.units || []).filter(g => g.kind === 'sub' || g.kind === 'user'); }
+
+// Baugruppen als eigene Projekte anlegen (jeweils mit eigener Reihenfolge); danach zurück ins Hauptprojekt
+async function spinOff(keys) {
+  const units = keys.map(k => (S.units || []).find(g => g.key === k)).filter(Boolean);
+  if (!units.length) return;
+  if (!S.sessionId) return toast('Bitte zuerst speichern');
+  await saveNow();
+  const stop = API?.busy ? API.busy(units.length === 1 ? `„${units[0].name}“ wird als eigenes Projekt angelegt …` : `${units.length} Baugruppen werden als eigene Projekte angelegt …`) : () => {};
+  const keep = {}; ['parts', 'steps', 'bom', 'match', 'contacts', 'boxVol', 'warnings', 'units', 'meta', 'elec', 'sel', 'sessionId', 'takenAt', 'projectId', 'stepName', 'stepSize', 'bomName'].forEach(k => { keep[k] = S[k]; });
+  const arts = units.map(unitArt);
+  const made = [];
+  try {
+    for (const [ui, u] of units.entries()) {
+      const ids = u.ids.slice().sort((a, b) => a - b);
+      const parts = ids.map((id, i) => {
+        const p = keep.parts[id], asm = p.asm || [], k = asm.findIndex(a => a.k === u.key);
+        return { id: i, name: p.name, clean: p.clean, asm: k >= 0 ? asm.slice(k + 1) : asm.slice(), geom: p.geom, box: p.box };
+      });
+      // Stückliste: nur die Zeilen dieser Teile
+      let bom = null; const match = {};
+      if (keep.bom) {
+        const rows = [], map = new Map();
+        for (const p of parts) { const i = keep.match[p.name]; if (i >= 0 && !map.has(i)) { map.set(i, rows.length); rows.push(keep.bom.rows[i]); } match[p.name] = i >= 0 ? map.get(i) : -1; }
+        bom = Object.assign({}, keep.bom, { rows });
+      } else parts.forEach(p => { match[p.name] = -1; });
+      Object.assign(S, { parts, bom, match, elec: null, sel: 0, takenAt: null, projectId: null, units: [], warnings: [], workerHasParts: false,
+        stepName: keep.stepName, stepSize: keep.stepSize, bomName: keep.bomName,
+        meta: { title: u.name, art: arts[ui], upAxis: keep.meta.upAxis, explode: keep.meta.explode !== false, ghost: false, pemJoin: keep.meta.pemJoin, subJoin: keep.meta.subJoin,
+          parent: { id: keep.sessionId, title: keep.meta.title, art: keep.meta.art } } });
+      await runSequence();
+      await createSession();
+      made.push({ key: u.key, id: S.sessionId, name: u.name });
+    }
+  } catch (e) { console.error(e); toast('Anlegen fehlgeschlagen: ' + (e.message || e)); }
+  finally {
+    Object.assign(S, keep); S.workerHasParts = false;
+    S.meta.children = Object.assign({}, S.meta.children || {}); made.forEach(m => { S.meta.children[m.key] = m.id; });
+    stop();
+  }
+  await saveNow(); thumbs.clear(); renderWork(); scheduleThumbs();
+  if (made.length) API.toast(made.length === 1 ? `„${made[0].name}“ ist jetzt ein eigenes Projekt mit ${''}eigenen Arbeitsschritten` : `${made.length} Baugruppen als eigene Projekte angelegt (unter „Angefangene Projekte“)`,
+    { label: made.length === 1 ? 'Öffnen' : 'Erste öffnen', run: () => openSession(made[0].id) });
+}
+function unitsPanel() {
+  const list = unitList();
+  const ch = S.meta.children || {};
+  return `<div class="sect">Baugruppen</div>
+  <div class="card stack">
+    <div class="tiny">Baugruppen erscheinen in der Stückliste als <b>eine</b> Zeile. Eigene Baugruppen bildest du, indem du im 3D Teile mit Strg + Klick wählst (oder links mehrere Schritte) und „📦 Baugruppe bilden“ antippst.</div>
+    ${list.length ? `<div class="cad-unitlist">${list.map(g => `<div class="cad-unit">
+        <div style="min-width:0"><b>${g.kind === 'user' ? '📦' : '🧩'} ${esc(g.name)}</b> <span class="tiny muted">${g.ids.length} Teile${unitArt(g) ? ' · ' + esc(unitArt(g)) : ''}${g.kind === 'sub' ? ' · aus dem CAD' : ''}</span>
+          ${ch[g.key] ? '<div class="tiny" style="color:var(--ok)">✓ eigene Anleitung angelegt</div>' : ''}</div>
+        <div class="row" style="gap:4px;flex-shrink:0">
+          ${ch[g.key] ? `<button class="btn sm" data-cad="unit-open" data-id="${ch[g.key]}">Öffnen</button>` : `<button class="btn sm" data-cad="unit-spin" data-key="${esc(g.key)}" title="Eigenes Projekt mit eigenen Arbeitsschritten anlegen">➜ eigene Anleitung</button>`}
+          ${g.kind === 'user' ? `<button class="btn sm ghost" data-cad="unit-edit" data-key="${esc(g.key)}" aria-label="Bearbeiten">✎</button><button class="btn sm ghost" data-cad="unit-del" data-key="${esc(g.key)}" title="Baugruppe auflösen">Auflösen</button>` : ''}
+        </div></div>`).join('')}</div>
+      ${list.filter(g => !ch[g.key]).length > 1 ? `<button class="btn block" data-cad="unit-spinall">Alle ${list.filter(g => !ch[g.key]).length} Baugruppen als eigene Anleitungen anlegen</button>` : ''}`
+      : '<div class="tiny muted">Noch keine Baugruppen.</div>'}
+    ${S.meta.parent ? `<div class="tiny">Dieses Projekt ist eine Baugruppe aus „${esc(S.meta.parent.title || 'Hauptprojekt')}“. <button class="btn sm ghost" data-cad="unit-open" data-id="${S.meta.parent.id}">Hauptprojekt öffnen</button></div>` : ''}
+  </div>`;
+}
 
 // ======================= Angefangene Projekte speichern / fortsetzen =======================
 // Eigene IndexedDB (unabhängig von den Anleitungen): „sessions“ = Bearbeitungsstand (klein, wird laufend gesichert),
@@ -508,7 +641,7 @@ async function saveNow() {
   try {
     const old = await CDB.get(S.sessionId);
     await CDB.put({ id: S.sessionId, created: old?.created || Date.now(), savedAt: Date.now(), takenAt: S.takenAt || old?.takenAt || null, projectId: S.projectId || old?.projectId || null,
-      title: S.meta.title, art: S.meta.art, stepName: S.stepName || '', stepSize: S.stepSize || 0, bomName: S.bomName || '',
+      title: S.meta.title, art: S.meta.art, stepName: S.stepName || '', stepSize: S.stepSize || 0, bomName: S.bomName || '', parentTitle: S.meta.parent ? S.meta.parent.title || '' : '',
       nParts: S.parts.length, nSteps: S.steps.length, state: snapshot() });
     setSaveState('saved');
   } catch (e) { console.error(e); setSaveState('error'); }
@@ -586,7 +719,7 @@ async function renderSessions() {
     <div class="card cad-sess">${list.map(r => `<div class="cad-sess-row">
       <div style="min-width:0"><b>${esc(r.title || r.stepName || 'Ohne Titel')}</b>${r.art ? ` <span class="tiny">${esc(r.art)}</span>` : ''}
         <div class="tiny">${r.nSteps} Schritte · ${r.nParts} Teile · zuletzt ${fmtWhen(r.savedAt)}${r.takenAt ? ' · <span class="chip" style="font-size:11px">übernommen</span>' : ''}</div>
-        ${r.stepName ? `<div class="tiny muted">${esc(r.stepName)}</div>` : ''}</div>
+        ${r.parentTitle ? `<div class="tiny" style="color:var(--brand)">🧩 Baugruppe aus „${esc(r.parentTitle)}“</div>` : r.stepName ? `<div class="tiny muted">${esc(r.stepName)}</div>` : ''}</div>
       <div class="row" style="gap:6px;flex-shrink:0"><button class="btn sm primary" data-cad="sess-open" data-id="${r.id}">Weiterarbeiten</button>
         <button class="btn sm ghost danger" data-cad="sess-del" data-id="${r.id}" aria-label="Löschen">🗑</button></div>
     </div>`).join('')}</div>`;
@@ -674,7 +807,7 @@ function multiBar() {
       <option value="end">ans Ende</option>
       <optgroup label="direkt nach Schritt …">${S.steps.map((s, i) => stepSel.has(s.uid) ? '' : `<option value="after:${s.uid}">nach ${i + 1} – ${esc(cut(s.title || ''))}</option>`).join('')}</optgroup>
     </select><button class="btn sm primary" data-cad="multimove">Verschieben</button></div>
-    <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm" data-cad="multimerge" title="Alle Teile der gewählten Schritte in einen Schritt">Zusammenfassen</button><button class="btn sm ghost" data-cad="multiclear">Aufheben</button></div>
+    <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm" data-cad="multimerge" title="Alle Teile der gewählten Schritte in einen Schritt">Zusammenfassen</button><button class="btn sm" data-cad="multiunit" title="Alle Teile der gewählten Schritte als eine Baugruppe (eine Stücklistenzeile)">📦 Baugruppe bilden</button><button class="btn sm ghost" data-cad="multiclear">Aufheben</button></div>
     <span class="tiny muted">Strg+Klick: dazu/weg · Umschalt+Klick: Bereich · gemeinsam ziehbar</span>
   </div>`;
 }
@@ -705,7 +838,7 @@ function mergeSelected() {
 const HIST = { undo: [], redo: [], last: null };
 function histState() {
   const E = S.elec;
-  return JSON.stringify({ steps: S.steps.map(({ _box, ...st }) => st), sel: S.sel, meta: { explode: S.meta.explode, upAxis: S.meta.upAxis },
+  return JSON.stringify({ steps: S.steps.map(({ _box, ...st }) => st), sel: S.sel, meta: { explode: S.meta.explode, upAxis: S.meta.upAxis, userUnits: S.meta.userUnits || [] }, units: S.units || [],
     elec: E ? { conns: E.conns, map: E.map } : null });
 }
 function histReset() { HIST.undo = []; HIST.redo = []; HIST.last = S.analyzed ? histState() : null; updateUndoBtns(); }
@@ -723,7 +856,7 @@ function histApply(json) {
   const st = JSON.parse(json);
   const before = new Map(S.steps.map(x => [x.uid, JSON.stringify(Object.assign({}, x, { _box: undefined }))]));
   S.steps = st.steps; S.sel = Math.min(st.sel, S.steps.length - 1);
-  Object.assign(S.meta, st.meta);
+  Object.assign(S.meta, st.meta); if (st.units) S.units = st.units;
   if (st.elec) { const E = elecInit(); E.conns = st.elec.conns; E.map = st.elec.map; }
   S.steps.forEach(x => { if (before.get(x.uid) !== JSON.stringify(Object.assign({}, x, { _box: undefined }))) thumbs.delete(x.uid); });
   HIST.last = json; pickMode = null; picked.clear();
@@ -764,7 +897,7 @@ function stepMaterials(st) {
   const units = (S.units || []).filter(g => st.parts.includes(g.main));
   const subs = new Map();
   for (const g of units) {
-    if (g.kind === 'sub') { g.ids.forEach(id => hideIds.add(id)); const k = 'unit:' + norm(g.name); if (!subs.has(k)) subs.set(k, { key: k, label: g.name, bom: bomByName(g.name), ids: [], unit: true }); subs.get(k).ids.push(g.main); }
+    if (g.kind === 'sub' || g.kind === 'user') { g.ids.forEach(id => hideIds.add(id)); const k = 'unit:' + norm(g.name); if (!subs.has(k)) subs.set(k, { key: k, label: g.name, bom: g.art ? { art: g.art, name: g.name } : bomByName(g.name), ids: [], unit: true }); subs.get(k).ids.push(g.main); }
     else g.ids.forEach(id => { if (id !== g.main) hideIds.add(id); });
   }
   for (const u of subs.values()) rows.push(Object.assign(u, { qty: u.ids.length, def: true }));
@@ -1105,7 +1238,7 @@ function renderPickBox() {
       <optgroup label="Als neuen Schritt"><option value="new:after">→ neuer Schritt nach ${S.sel + 1}</option><option value="new:before">→ neuer Schritt vor ${S.sel + 1}</option><option value="new:end">→ neuer Schritt ganz am Ende</option></optgroup>
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
-    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button></div>
+    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button>${picked.size > 1 ? '<button class="btn sm" data-cad="pickunit" title="Gewählte Teile zu einer Baugruppe zusammenfassen">📦 Baugruppe bilden</button>' : ''}</div>
     <span class="tiny muted">Strg + Klick: weitere Teile dazu</span>`;
   box.hidden = false;
 }
@@ -1158,6 +1291,9 @@ const STYLE = `
 .cad-frame{position:absolute;pointer-events:none;z-index:1;border:1px dashed rgba(60,66,76,.35);box-shadow:0 0 0 9999px rgba(30,34,40,.07)}
 .cad-viewer{overflow:hidden}
 .cad-frame span{position:absolute;right:6px;bottom:6px;font:500 10px/1 system-ui,sans-serif;color:rgba(60,66,76,.6);letter-spacing:.02em}
+.cad-modal{position:fixed;inset:0;z-index:200;background:rgba(20,22,28,.45);display:grid;place-items:center;padding:16px}
+.cad-modal-box{background:#fff;border-radius:14px;padding:18px;width:min(460px,100%);box-shadow:0 20px 50px rgba(0,0,0,.25)}
+.cad-unitlist{display:grid;gap:2px}.cad-unit{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}.cad-unit:last-child{border-bottom:0}
 .cad-sublist{display:grid;gap:4px;max-height:220px;overflow:auto;padding-left:26px}
 .cad-toolbar{position:sticky;top:0;z-index:2;background:var(--bg);padding:2px 2px 8px;display:grid;gap:2px}
 .cad-toolbar select{min-height:38px;font-size:14px}
@@ -1455,6 +1591,9 @@ function renderIns() {
     ${mats.filter(r => r.unit).map(r => `<tr class="${r.show ? '' : 'mat-off'}"><td><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td><b>${r.qty}×</b></td><td>📦 ${esc(r.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${r.bom ? esc(r.bom.art) : 'Unterbaugruppe · ohne Art.-Nr.'}</div></td><td class="tiny">als Einheit</td></tr>`).join('')}
     ${groups.map((g, gi) => { const r = mats.find(x => !x.unit && x.key === groupOf(S.parts[g.ids[0]])) || { show: true, key: '' }; return g.ids.map((id, k) => `<tr class="${r.show ? '' : 'mat-off'}">${k === 0 ? `<td rowspan="${g.ids.length}"><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td rowspan="${g.ids.length}"><b>${g.ids.length}×</b><br><input type="color" class="cad-col" data-gcol="${g.ids.join(',')}" value="${st.colors?.[g.ids[0]] || CONTRAST[0]}" title="Farbe dieser Teile im Bild" aria-label="Farbe für ${esc(g.label)}"></td><td rowspan="${g.ids.length}">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select></td></tr>`).join(''); }).join('')}
   </tbody></table>${mats.some(r => !r.show) ? `<div class="tiny" style="margin-top:6px">Ausgegraute Zeilen (ohne Häkchen) erscheinen nicht in der Materialliste der Anleitung.</div>` : ''}</div>
+  ${(() => { const g = st.main !== undefined && unitList().find(u => u.main === st.main); if (!g) return ''; const ch = (S.meta.children || {})[g.key];
+    return `<div class="banner info" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:180px">${g.kind === 'user' ? '📦' : '🧩'} <b>${esc(g.name)}</b> ist eine Baugruppe (${g.ids.length} Teile) – in der Stückliste eine Zeile${unitArt(g) ? ' (' + esc(unitArt(g)) + ')' : ''}.</span>
+      ${ch ? `<button class="btn sm" data-cad="unit-open" data-id="${ch}">Ihre Anleitung öffnen</button>` : `<button class="btn sm" data-cad="unit-spin" data-key="${esc(g.key)}">➜ Als eigene Anleitung entkoppeln</button>`}</div>`; })()}
   <div class="row" style="margin-top:10px;flex-wrap:wrap">
     <button class="btn sm" data-cad="merge" ${S.sel === 0 ? 'disabled' : ''}>Mit vorherigem zusammenfassen</button>
     <button class="btn sm" data-cad="tostart" ${S.sel <= 1 ? 'disabled' : ''} title="Direkt nach dem Grundteil einordnen">⤒ An den Anfang</button>
@@ -1551,6 +1690,7 @@ function renderOpt(el) {
     <div><label class="f" for="cad-mt">Produkt (für die Anleitung)</label><input id="cad-mt" value="${esc(S.meta.title)}"></div>
     <div><label class="f" for="cad-ma">Artikelnummer / Variante</label><input id="cad-ma" value="${esc(S.meta.art)}"></div>
   </div>
+  ${unitsPanel()}
   <div class="sect">Zusammengehörige Teile</div>
   <div class="card stack">
     <label class="row" style="gap:8px;cursor:pointer;align-items:flex-start"><input type="checkbox" id="cad-pem" ${S.meta.pemJoin !== false ? 'checked' : ''} style="width:18px;height:18px;min-height:0;margin-top:2px"><span>Einpressmuttern/-bolzen und Nietmuttern mit ihrem Blechteil als ein Teil behandeln<br><span class="tiny">${(S.units || []).filter(g => g.kind === 'pem').length} Blechteil(e) erkannt (Name enthält z. B. „Einpress“, „PEM“, „S-M4“, „Nietmutter“).</span></span></label>
@@ -2309,6 +2449,13 @@ document.addEventListener('click', e => {
     case 'frame': S.meta.frame = S.meta.frame === false; el.setAttribute('aria-pressed', S.meta.frame !== false); return placeFrame();
     case 'multimove': return moveStepsTo($('#cad-multi-to', ROOT).value);
     case 'multimerge': return mergeSelected();
+    case 'multiunit': return makeUserUnit(S.steps.filter(st => stepSel.has(st.uid) && st.kind !== 'wire').flatMap(st => st.parts));
+    case 'pickunit': return makeUserUnit([...picked]);
+    case 'unit-edit': return editUserUnit(el.dataset.key);
+    case 'unit-del': return dissolveUnit(el.dataset.key);
+    case 'unit-spin': return spinOff([el.dataset.key]);
+    case 'unit-spinall': { const ch = S.meta.children || {}; return spinOff(unitList().filter(g => !ch[g.key]).map(g => g.key)); }
+    case 'unit-open': return openSession(el.dataset.id);
     case 'multiclear': stepSel.clear(); return markSteps();
     case 'toolchk': { const u = el.dataset.uid; if (el.checked) toolOff.delete(u); else toolOff.add(u); return renderWork(); }
     case 'toolbundle': return bundleTool();
