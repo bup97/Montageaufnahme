@@ -505,6 +505,7 @@ async function makeUserUnit(ids) {
   const main = ids.slice().sort((a, b) => (S.boxVol[b] || 0) - (S.boxVol[a] || 0))[0];
   const r = await askUnit('Baugruppe bilden (' + ids.length + ' Teile)', labelOf(S.parts[main]) + ' (Baugruppe)', '');
   if (!r) return;
+  const curUid0 = S.steps[S.sel]?.uid, curIdx0 = S.sel;
   // andere eigene Baugruppen verlieren diese Teile
   S.meta.userUnits = (S.meta.userUnits || []).map(u => Object.assign({}, u, { ids: u.ids.filter(x => !ids.includes(x)) })).filter(u => u.ids.length > 1);
   const key = 'u' + rid();
@@ -522,7 +523,10 @@ async function makeUserUnit(ids) {
   S.units.push({ kind: 'user', key, name: r.name, art: r.art, ids: ids.slice(), main });
   target.unit = r.name; target.main = main; target.auto = true; delete target.matVis;
   picked.clear(); stepSel.clear();
-  afterChange(); S.sel = Math.max(0, S.steps.indexOf(target)); refreshSel();
+  const keepUid = curUid0, keepIdx = curIdx0;
+  afterChange();
+  const still = S.steps.findIndex(x => x.uid === keepUid);
+  S.sel = Math.max(0, Math.min(S.steps.length - 1, still >= 0 ? still : keepIdx)); refreshSel();
   toast(`Baugruppe „${r.name}“ gebildet (${ids.length} Teile) – in der Stückliste nur noch eine Zeile`);
 }
 
@@ -566,6 +570,8 @@ async function addToUnit(key, ids) {
   u.ids = [...new Set(u.ids.concat(ids))];
   // andere Einheiten geben die Teile ab
   S.units = (S.units || []).map(x => x.key === key ? x : Object.assign({}, x, { ids: x.ids.filter(id => !ids.includes(id)) })).filter(x => x.key === key || x.ids.length > 1);
+  // Position merken: danach beim selben Schritt bzw. dem nächsten weitermachen – nicht in die Baugruppe springen
+  const curUid = S.steps[S.sel]?.uid, curIdx = S.sel;
   const srcSteps = new Map();   // für die eigene Anleitung: Teile je Herkunftsschritt
   const target = S.steps.find(st => st.kind !== 'wire' && st.parts.includes(g.main));
   for (const id of ids) {
@@ -578,7 +584,9 @@ async function addToUnit(key, ids) {
   if (target) { target.unit = g.name; target.main = g.main; }
   picked.clear(); stepSel.clear();
   const child = (S.meta.children || {})[key];
-  afterChange(); if (target) { S.sel = Math.max(0, S.steps.indexOf(target)); refreshSel(); }
+  afterChange();
+  const still = S.steps.findIndex(x => x.uid === curUid);
+  S.sel = Math.max(0, Math.min(S.steps.length - 1, still >= 0 ? still : curIdx)); refreshSel();
   if (child) {
     const groups = [...srcSteps.entries()].map(([st, list]) => ({ ids: list, dir: st.dir, title: st.auto ? '' : st.title, text: st.auto ? '' : st.text, tools: st.tools || '' }));
     const n = await appendToChild(child, groups);
