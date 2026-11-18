@@ -40,7 +40,7 @@ const Export = (() => {
         if (data) slide.addImage({ data, x: e.x, y: e.y, w: e.w, h: e.h });
       } else if (e.type === 'table') {
         const rows = e.rows.map(r => r.map(c => ({ text: c.text, options: { ...c.o, color: c.o.color, fill: c.o.fill ? { color: c.o.fill } : undefined, fontFace: 'Calibri', valign: 'middle' } })));
-        slide.addTable(rows, { x: e.x, y: e.y, w: e.w, colW: e.colW, rowH: e.rowH, border: e.border, margin: 0.05, autoPage: false });
+        slide.addTable(rows, { x: e.x, y: e.y, w: e.w, colW: e.colW, rowH: e.rowH, border: e.border, margin: e.margin || 0.05, autoPage: false });
       }
     });
   }
@@ -62,10 +62,12 @@ const Export = (() => {
     const metas = {};
     for (const s of project.steps) metas[s.id] = await Promise.all((s.photoIds || []).map(async id => { const ph = await getPhoto(id); return ph ? { id, w: ph.w, h: ph.h } : null; })).then(a => a.filter(Boolean));
 
-    draw(pres, pres.addSlide(), Layout.layoutTitleSlide(project, project.steps.length).els, imgs);
-    labels.start.forEach(l => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l).els, imgs));
-    project.steps.forEach((s, i) => draw(pres, pres.addSlide(), Layout.layoutStepSlide(s, i + 1, metas[s.id]).els, imgs));
-    labels.end.forEach(l => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l).els, imgs));
+    // Label-Schritte zählen mit: Start-Labels 1…k, dann die Arbeitsschritte, dann die End-Labels
+    const k = labels.start.length;
+    draw(pres, pres.addSlide(), Layout.layoutTitleSlide(project, Layout.totalSteps(project)).els, imgs);
+    labels.start.forEach((l, j) => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l, j + 1).els, imgs));
+    project.steps.forEach((s, i) => draw(pres, pres.addSlide(), Layout.layoutStepSlide(s, i + 1 + k, metas[s.id]).els, imgs));
+    labels.end.forEach((l, j) => draw(pres, pres.addSlide(), Layout.layoutLabelSlide(l, k + project.steps.length + j + 1).els, imgs));
 
     const blob = await pres.write({ outputType: 'blob' });
     return { blob, name: fileBase(project, 'Montageanleitung') + '.pptx',
@@ -76,7 +78,9 @@ const Export = (() => {
   function bom(project) {
     const map = new Map();
     project.steps.forEach((s, i) => (s.materials || []).forEach(m => {
-      const key = (m.number || '').toUpperCase().trim(); if (!key) return;
+      const no = (m.number || '').toUpperCase().trim(); if (!no) return;
+      // gleiche Nummer mit unterschiedlicher Bezeichnung (z. B. Kabellängen) bleibt getrennt
+      const key = no + '|' + String(m.description || '').trim().replace(/\s+/g, ' ').toLowerCase();
       const e = map.get(key) || { number: m.number.trim(), description: '', quantity: 0, steps: [] };
       e.quantity += Number(m.quantity) || 0;
       if (!e.description && m.description) e.description = m.description;
