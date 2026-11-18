@@ -1365,6 +1365,7 @@ function renderPickBox() {
 }
 // Mehrere Teile auf einmal verschieben; der angezeigte Schritt bleibt gewählt
 function movePartsTo(ids, to) {
+  const ctx = posCtx();
   const cur = S.steps[S.sel];
   const fromOf = (id) => S.steps.find(st => st.parts.includes(id));
   let target;
@@ -1375,9 +1376,8 @@ function movePartsTo(ids, to) {
     S.steps.splice(at, 0, target);
   } else { target = S.steps[to]; if (!target || target.kind === 'wire') return; }
   for (const id of ids) { const f = fromOf(id); if (f === target) continue; if (f) f.parts = f.parts.filter(x => x !== id); target.parts.push(id); }
-  const keep = cur && cur.parts.length ? cur : target;
   afterChange();
-  S.sel = Math.max(0, S.steps.indexOf(keep)); refreshSel();
+  stayNear(ctx); refreshSel();
   const n = S.steps.indexOf(target) + 1;
   toast(`${ids.length === 1 ? '„' + labelOf(S.parts[ids[0]]) + '“' : ids.length + ' Teile'} → Schritt ${n}`, 'Anzeigen', () => select(n - 1));
 }
@@ -1878,9 +1878,19 @@ function deleteStep(i) {
     afterChange();
   });
 }
+// Nach dem Verschieben: beim bisherigen Schritt bleiben; ist er leer geworden, den Schritt anzeigen,
+// der vorher direkt danach kam (bzw. davor, wenn es der letzte war) – nicht zum Ziel springen.
+function stayNear(ctx) {
+  let i = S.steps.findIndex(x => x.uid === ctx.cur);
+  if (i < 0) i = S.steps.findIndex(x => x.uid === ctx.next);
+  if (i < 0) i = S.steps.findIndex(x => x.uid === ctx.prev);
+  S.sel = Math.max(0, Math.min(S.steps.length - 1, i >= 0 ? i : ctx.idx));
+}
+const posCtx = () => ({ cur: S.steps[S.sel]?.uid, next: S.steps[S.sel + 1]?.uid, prev: S.steps[S.sel - 1]?.uid, idx: S.sel });
 // Teil verschieben: 'new' / 'new:after' = neuer Schritt direkt danach, 'new:before' = davor, Zahl = zu diesem Schritt.
 // Der bearbeitete Schritt bleibt ausgewählt, damit man weitere Teile verschieben kann.
 function movePart(id, to) {
+  const ctx = posCtx();
   const from = S.steps.find(s => s.parts.includes(id));
   if (!from) {                                  // Teil aus einem gelöschten Schritt wieder aufnehmen
     const t = typeof to === 'number' ? S.steps[to] : S.steps[S.sel]; if (!t || t.kind === 'wire') return;
@@ -1900,9 +1910,8 @@ function movePart(id, to) {
   }
   const target = S.steps.find(s => s.parts.includes(id));
   // Auswahl auf dem bisherigen Schritt halten (falls er leer wurde: auf dem Ziel)
-  const keep = cur && cur.parts.length ? cur : target;
   afterChange();
-  S.sel = Math.max(0, S.steps.indexOf(keep));
+  stayNear(ctx);
   const n = S.steps.indexOf(target) + 1;
   refreshSel();
   toast(msg.replace('eigener Schritt', 'eigener Schritt ' + n), 'Anzeigen', () => select(n - 1));
