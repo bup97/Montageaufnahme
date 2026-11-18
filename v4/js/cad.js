@@ -1437,7 +1437,8 @@ const STYLE = `
 .cad-nav span{min-width:64px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
 .cad-legend{position:absolute;left:10px;bottom:14px;font-size:12px;color:var(--ink2);background:rgba(255,255,255,.88);border-radius:8px;padding:4px 8px}
 .cad-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 8px;vertical-align:-1px}
-.cad-pick{position:absolute;right:10px;bottom:62px;max-width:320px;z-index:4;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px}
+.cad-pick{position:absolute;right:10px;bottom:62px;width:min(340px,calc(100% - 20px));max-height:calc(100% - 80px);overflow-y:auto;z-index:4;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px;box-sizing:border-box}
+.cad-pick>*{min-width:0}.cad-pick .row{flex-wrap:wrap;gap:6px}.cad-pick .btn{white-space:nowrap}.cad-pick .tiny{white-space:normal;overflow-wrap:anywhere}.cad-pick select{width:100%;min-width:0}
 .cad-ptab{width:100%;border-collapse:collapse;font-size:13px}
 .cad-ptab td,.cad-ptab th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .cad-ptab th{font-size:11.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.04em}
