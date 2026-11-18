@@ -803,7 +803,7 @@ async function closeSession() {
   Object.assign(S, { analyzed: false, parts: [], steps: [], sel: 0, bom: null, match: {}, contacts: new Map(), boxVol: [], warnings: [], elec: null,
     stepFile: null, bomFile: null, sessionId: null, takenAt: null, projectId: null, stepName: '', stepSize: 0, bomName: '' });
   S.meta = { title: '', art: '', upAxis: 'z', explode: true, ghost: false };
-  thumbs.clear(); picked.clear(); histReset(); render();
+  thumbs.clear(); picked.clear(); hiddenParts.clear(); histReset(); render();
 }
 const fmtWhen = (t) => { const d = new Date(t), z = (n) => String(n).padStart(2, '0'); const today = new Date().toDateString() === d.toDateString();
   return (today ? 'heute' : `${z(d.getDate())}.${z(d.getMonth() + 1)}.${d.getFullYear()}`) + `, ${z(d.getHours())}:${z(d.getMinutes())} Uhr`; };
@@ -1198,6 +1198,9 @@ function colMat(hex) {
 }
 let offscreen = false;      // beim Erzeugen von Bildern keine Auswahl-Hervorhebung
 function markPicked() { if (offscreen) return; picked.forEach(id => { const m = meshes[id]; if (m) { m.visible = true; m.material = mats.pick; } }); }
+// Nur für die Ansicht beim Bearbeiten (nicht im Folienbild): einzeln ausgeblendete Teile
+const hiddenParts = new Set();
+const PV_LABEL = { show: 'Verbaute: sichtbar', faint: 'Verbaute: durchsichtig', hide: 'Verbaute: aus' };
 function applyStep(si) {
   const st = S.steps[si]; if (!st) return;
   clearWires();
@@ -1208,8 +1211,12 @@ function applyStep(si) {
   meshes.forEach((m, id) => {
     m.position.set(0, 0, 0); ghostMeshes[id].visible = false;
     if (now.has(id)) { m.visible = true; m.material = colMat(st.colors?.[id]) || mats.newp; if (off) { m.position.copy(off); ghostMeshes[id].visible = true; } }
-    else if (placed.has(id)) { m.visible = true; m.material = baseIds.has(id) ? mats.base : mats.placed; }
+    else if (placed.has(id)) {
+      const pv = offscreen ? 'show' : (S.meta.placedView || 'show');
+      m.visible = pv !== 'hide'; m.material = pv === 'faint' ? mats.faint : baseIds.has(id) ? mats.base : mats.placed;
+    }
     else { m.visible = S.meta.ghost; m.material = mats.ghost; }
+    if (!offscreen && hiddenParts.has(id)) { m.visible = false; ghostMeshes[id].visible = false; }
   });
   arrowGroup.children.forEach(c => c.children.forEach(x => x.geometry?.dispose()));
   arrowGroup.clear();
@@ -1328,6 +1335,7 @@ function onPick(e) {
   applyStep(S.sel); renderPickBox();
 }
 const picked = new Set();
+function updateUnhide() { const b = ROOT && $('#cad-unhide', ROOT); if (b) { b.hidden = !hiddenParts.size; b.textContent = `👁 ${hiddenParts.size} einblenden`; } }
 function renderPickBox() {
   const box = ROOT && $('#cad-pick', ROOT); if (!box) return;
   [...picked].forEach(id => { if (!S.parts[id]) picked.delete(id); });
@@ -1351,8 +1359,8 @@ function renderPickBox() {
       <optgroup label="Als neuen Schritt"><option value="new:after">→ neuer Schritt nach ${S.sel + 1}</option><option value="new:before">→ neuer Schritt vor ${S.sel + 1}</option><option value="new:end">→ neuer Schritt ganz am Ende</option></optgroup>
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
-    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button>${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
-    <span class="tiny muted">Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt</span>`;
+    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button><button class="btn sm ghost" data-cad="pickhide" title="Gewählte Teile in der Ansicht ausblenden (nicht im Folienbild)">🙈 Ausblenden</button>${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
+    <span class="tiny muted">Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt · H: ausblenden</span>`;
   box.hidden = false;
 }
 // Mehrere Teile auf einmal verschieben; der angezeigte Schritt bleibt gewählt
@@ -1643,6 +1651,8 @@ function renderWork() {
         <div class="cad-tools">
           <button class="cad-tg" data-cad="explode" aria-pressed="${S.meta.explode}" title="Pfeilansicht für alle Schritte ein/aus – einzelne Schritte rechts unter „Bild“ umstellen">Explosion</button>
           <button class="cad-tg" data-cad="ghost" aria-pressed="${S.meta.ghost}">Folgeteile</button>
+          <button class="cad-tg" data-cad="placedview" aria-pressed="${(S.meta.placedView || 'show') !== 'show'}" title="Bereits verbaute Teile durchsichtig machen oder ausblenden – z. B. um unter Abdeckungen zu sehen (nur in der Ansicht, nicht im Folienbild)">${PV_LABEL[S.meta.placedView || 'show']}</button>
+          <button class="cad-tg" data-cad="unhide" id="cad-unhide" ${hiddenParts.size ? '' : 'hidden'} title="Ausgeblendete Teile wieder zeigen">👁 ${hiddenParts.size} einblenden</button>
           <button class="cad-tg" data-cad="camsave">Ansicht merken</button>
           <button class="cad-tg" data-cad="camauto">Auto</button>
           <button class="cad-tg" data-cad="frame" aria-pressed="${S.meta.frame !== false}" title="Rahmen zeigen, welcher Ausschnitt aufs Folienbild kommt">▭ Folie</button>
@@ -2578,6 +2588,10 @@ document.addEventListener('click', e => {
     case 'redo': return redo();
     case 'pickmove': { const v = $('#cad-pick-to', ROOT).value; const ids = [...picked]; picked.clear(); return movePartsTo(ids, v.startsWith('new') ? v : +v); }
     case 'pickclose': picked.clear(); applyStep(S.sel); return renderPickBox();
+    case 'placedview': { const order = ['show', 'faint', 'hide']; S.meta.placedView = order[(order.indexOf(S.meta.placedView || 'show') + 1) % 3];
+      el.textContent = PV_LABEL[S.meta.placedView]; el.setAttribute('aria-pressed', S.meta.placedView !== 'show'); applyStep(S.sel); return; }
+    case 'pickhide': { picked.forEach(id => hiddenParts.add(id)); picked.clear(); renderPickBox(); updateUnhide(); applyStep(S.sel); return; }
+    case 'unhide': hiddenParts.clear(); updateUnhide(); applyStep(S.sel); return;
     case 'pickgo': { const i = +el.dataset.i; picked.clear(); renderPickBox(); return select(i); }
     case 'reseq': {
       el.disabled = true; el.textContent = 'Berechne …';
@@ -2613,6 +2627,10 @@ document.addEventListener('keydown', e => {
   const inField = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
   if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'z') { e.preventDefault(); return e.shiftKey ? redo() : undo(); }
   if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'y') { e.preventDefault(); return redo(); }
+  if (!inField && !e.ctrlKey && !e.metaKey && (e.key === 'h' || e.key === 'H')) {   // H: gewählte Teile ausblenden, Umschalt+H: alle wieder zeigen
+    if (e.shiftKey) { hiddenParts.clear(); } else if (picked.size) { picked.forEach(id => hiddenParts.add(id)); picked.clear(); renderPickBox(); } else return;
+    updateUnhide(); applyStep(S.sel); return;
+  }
   if (e.key === 'Escape' && stepSel.size && !inField) { stepSel.clear(); return markSteps(); }
   if (e.key === 'Escape' && picked.size) { picked.clear(); applyStep(S.sel); return renderPickBox(); }
   if (inField) return;
