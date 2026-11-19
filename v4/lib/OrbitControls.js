@@ -995,9 +995,11 @@ class OrbitControls extends EventDispatcher {
 
 			if ( scope.enabled === false ) return;
 
+			if ( pointers.length && event.pointerType !== 'touch' ) resetStuck();
+
 			if ( pointers.length === 0 ) {
 
-				scope.domElement.setPointerCapture( event.pointerId );
+				try { scope.domElement.setPointerCapture( event.pointerId ); } catch ( e ) { /* Zeiger schon weg */ }
 
 				scope.domElement.addEventListener( 'pointermove', onPointerMove );
 				scope.domElement.addEventListener( 'pointerup', onPointerUp );
@@ -1042,7 +1044,7 @@ class OrbitControls extends EventDispatcher {
 
 			if ( pointers.length === 0 ) {
 
-				scope.domElement.releasePointerCapture( event.pointerId );
+				try { scope.domElement.releasePointerCapture( event.pointerId ); } catch ( e ) { /* egal */ }
 
 				scope.domElement.removeEventListener( 'pointermove', onPointerMove );
 				scope.domElement.removeEventListener( 'pointerup', onPointerUp );
@@ -1184,7 +1186,21 @@ class OrbitControls extends EventDispatcher {
 
 		}
 
+		function resetStuck() {
+
+			// Funkwerk: ging ein „Taste losgelassen“ verloren (z. B. Fenster-/Fokuswechsel), blieb die Steuerung
+			// im Zieh-Zustand hängen und ignorierte das Mausrad. Ohne gedrückte Taste wird der Zustand zurückgesetzt.
+			pointers.length = 0;
+			for ( const k in pointerPositions ) delete pointerPositions[ k ];
+			scope.domElement.removeEventListener( 'pointermove', onPointerMove );
+			scope.domElement.removeEventListener( 'pointerup', onPointerUp );
+			state = STATE.NONE;
+
+		}
+
 		function onMouseWheel( event ) {
+
+			if ( state !== STATE.NONE && event.buttons === 0 ) resetStuck();
 
 			if ( scope.enabled === false || scope.enableZoom === false || state !== STATE.NONE ) return;
 
@@ -1404,6 +1420,7 @@ class OrbitControls extends EventDispatcher {
 
 		scope.domElement.addEventListener( 'pointerdown', onPointerDown );
 		scope.domElement.addEventListener( 'pointercancel', onPointerUp );
+		scope.domElement.addEventListener( 'lostpointercapture', ( e ) => { if ( pointers.includes( e.pointerId ) && e.pointerType !== 'touch' ) onPointerUp( e ); } );
 		scope.domElement.addEventListener( 'wheel', onMouseWheel, { passive: false } );
 
 		// force an update at start

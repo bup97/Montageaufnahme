@@ -1197,6 +1197,9 @@ function initThree() {
   const loop = () => {
     requestAnimationFrame(loop);
     if (!renderer || gpuLost || !renderer.domElement.isConnected) return;
+    if (!Number.isFinite(camera.position.x + camera.position.y + camera.position.z + controls.target.x + controls.target.y + controls.target.z)) {
+      const st = S.steps?.[S.sel]; if (st) { if (st.cam) st.cam = null; try { setCam(camera, autoCam(S.sel, camera, viewAspect()), controls); } catch (e) { } }   // kaputte Kamera reparieren
+    }
     if (controls.update() || needRender) { needRender = false; if (wireStepShown()) layoutWireLabels(camera); renderer.render(scene, camera); }
   };
   loop();
@@ -1204,6 +1207,20 @@ function initThree() {
 function attachViewer(el) {
   initThree();
   el.prepend(renderer.domElement);
+  // Mausrad über Schildern/Boxen im 3D-Fenster (Auswahlbox, Legende, Titel …) trotzdem zum Zoomen nutzen,
+  // außer die Box kann selbst noch in diese Richtung scrollen
+  if (!el._wheelFwd) { el._wheelFwd = true; el.addEventListener('wheel', e => {
+    if (e.target === renderer.domElement || e._fwd) return;
+    for (let n = e.target; n && n !== el; n = n.parentElement) {
+      if (n.scrollHeight > n.clientHeight + 1 && /(auto|scroll)/.test(getComputedStyle(n).overflowY)) {
+        if ((e.deltaY < 0 && n.scrollTop > 0) || (e.deltaY > 0 && n.scrollTop + n.clientHeight < n.scrollHeight - 1)) return;
+      }
+      if (n.tagName === 'SELECT' || n.tagName === 'TEXTAREA') return;
+    }
+    e.preventDefault();
+    const f = new WheelEvent('wheel', { deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode, clientX: e.clientX, clientY: e.clientY, ctrlKey: e.ctrlKey, buttons: e.buttons, bubbles: false, cancelable: true });
+    f._fwd = true; renderer.domElement.dispatchEvent(f);
+  }, { passive: false }); }
   resizeObs?.disconnect();
   resizeObs = new ResizeObserver(() => {
     const w = el.clientWidth, h = el.clientHeight; if (!w || !h) return;
@@ -1424,11 +1441,14 @@ function autoCam(si, cam, aspect) {
   return { p: sphere.center.clone().add(dir.multiplyScalar(dist)).toArray(), t: sphere.center.toArray(), near: dist / 100, far: dist * 20 };
 }
 function setCam(cam, v, ctrl) {
+  const okArr = (a) => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
+  if (!v || !okArr(v.p) || !okArr(v.t)) return;          // ungültige gespeicherte Ansicht nicht übernehmen
   cam.position.fromArray(v.p); cam.near = v.near || 1; cam.far = v.far || 1e5; cam.updateProjectionMatrix();
   if (ctrl) { ctrl.target.fromArray(v.t); ctrl.update(); } else cam.lookAt(new THREE.Vector3().fromArray(v.t));
 }
 const SLIDE_W = 1600, SLIDE_H = 1500, SLIDE_ASPECT = SLIDE_W / SLIDE_H;   // Bildgröße auf der Folie
-const camFor = (si, cam, aspect) => S.steps[si].cam || autoCam(si, cam, aspect);
+const camOk = (v) => v && [v.p, v.t].every(a => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite));
+const camFor = (si, cam, aspect) => camOk(S.steps[si].cam) ? S.steps[si].cam : autoCam(si, cam, aspect);
 // 3D-Ansicht: automatisch so einpassen, dass alles im Folienausschnitt liegt (nicht nur in der breiteren Ansicht)
 const viewAspect = () => Math.min(camera.aspect, SLIDE_ASPECT);
 // Rahmen in der 3D-Ansicht = genau der Bereich, der aufs Folienbild kommt (gleiche Kamera, gleicher Öffnungswinkel)
@@ -1624,8 +1644,8 @@ const STYLE = `
 .cad-nav span{min-width:64px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
 .cad-legend{position:absolute;left:10px;bottom:14px;font-size:12px;color:var(--ink2);background:rgba(255,255,255,.88);border-radius:8px;padding:4px 8px}
 .cad-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 8px;vertical-align:-1px}
-.cad-pick{position:absolute;right:10px;bottom:62px;width:min(340px,calc(100% - 20px));max-height:calc(100% - 80px);overflow-y:auto;z-index:4;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px;box-sizing:border-box}
-.cad-pick>*{min-width:0}.cad-pick .row{flex-wrap:wrap;gap:6px}.cad-pick .btn{white-space:nowrap}.cad-pick .tiny{white-space:normal;overflow-wrap:anywhere}.cad-pick select{width:100%;min-width:0}
+.cad-pick{position:absolute;right:10px;bottom:62px;width:min(340px,calc(100% - 20px));max-height:calc(100% - 200px);overflow-y:auto;z-index:4;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px;box-sizing:border-box}
+.cad-pick[hidden]{display:none!important}.cad-pick>*{min-width:0}.cad-pick .row{flex-wrap:wrap;gap:6px}.cad-pick .btn{white-space:nowrap}.cad-pick .tiny{white-space:normal;overflow-wrap:anywhere}.cad-pick select{width:100%;min-width:0}
 .cad-ptab{width:100%;border-collapse:collapse;font-size:13px}
 .cad-ptab td,.cad-ptab th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .cad-ptab th{font-size:11.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.04em}
