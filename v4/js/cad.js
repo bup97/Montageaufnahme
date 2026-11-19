@@ -1235,14 +1235,88 @@ const DIRV = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1
 const isoDir = () => S.meta.upAxis === 'y' ? new THREE.Vector3(1, 0.9, 1.25).normalize() : new THREE.Vector3(1, -1.25, 0.9).normalize();
 function partsBox(ids) { const b = new THREE.Box3(); ids.forEach(id => b.union(S.parts[id].box)); return b; }
 // Bild eines Schritts: mit Pfeil (Teil vor der Einbaulage) oder eingebaut. Ohne eigene Wahl gilt der Schalter „Explosion“.
-const showsArrow = (st) => st.view ? st.view === 'explode' : S.meta.explode;
-function explodeOffset(si) {
-  const st = S.steps[si]; if (!showsArrow(st) || st.kind === 'base' || st.dir < 0) return null;
+const showsArrow = (st) => st.view ? (st.view === 'explode' || st.view === 'fan') : S.meta.explode;
+function explodeLen(st) {
   const sz = partsBox(st.parts).getSize(new THREE.Vector3());
-  const along = [sz.x, sz.y, sz.z][st.dir >> 1];
+  const along = st.dir >= 0 ? [sz.x, sz.y, sz.z][st.dir >> 1] : sz.length() * 0.5;
   const diag = modelBox.getSize(new THREE.Vector3()).length();
-  return DIRV[st.dir].clone().multiplyScalar(Math.min(Math.max(along * 1.3, diag * 0.06, 15), diag * 0.35));
+  return Math.min(Math.max(along * 1.3, diag * 0.06, 15), diag * 0.35);
 }
+function explodeOffset(si) {
+  const st = S.steps[si]; if (!showsArrow(st) || st.view === 'fan' || st.kind === 'base' || st.dir < 0) return null;
+  return DIRV[st.dir].clone().multiplyScalar(explodeLen(st));
+}
+// Explosionszeichnung eines Schritts: Komponenten einzeln aufgefächert. Baugruppen bleiben zusammen;
+// Teile auf gleicher Höhe (in Montagerichtung) rücken gleich weit, weiter außen liegende weiter.
+function fanGroups(st) {
+  const done = new Set(), out = [];
+  for (const g of (S.units || [])) if (g.ids.length && g.ids.every(id => st.parts.includes(id))) { out.push(g.ids.slice()); g.ids.forEach(id => done.add(id)); }
+  st.parts.forEach(id => { if (!done.has(id)) out.push([id]); });
+  return out;
+}
+function partOffsets(si) {
+  const st = S.steps[si]; if (!st || st.kind === 'base' || st.kind === 'wire') return null;
+  if (st.view !== 'fan') { const off = explodeOffset(si); return off ? { offs: new Map(st.parts.map(id => [id, off])), main: off, lines: false } : null; }
+  const groups = fanGroups(st); if (groups.length < 2 && st.dir < 0) return null;
+  const diag = modelBox.getSize(new THREE.Vector3()).length(), offs = new Map(), L0 = explodeLen(st);
+  if (st.dir >= 0) {
+    const d = DIRV[st.dir];
+    // Reihenfolge aus der Geometrie: liegt Komponente X in Montagerichtung über Y (z. B. Schraubenkopf über dem Blech),
+    // muss X zuerst ab → X wird weiter herausgerückt. Ebene = längste Kette solcher „liegt über“-Beziehungen.
+    const lv = fanLevels(st, groups, st.dir);
+    const levels = [];
+    groups.forEach((ids, i) => { const b = partsBox(ids), sz = b.getSize(new THREE.Vector3());
+      const ext = Math.abs(sz.x * d.x) + Math.abs(sz.y * d.y) + Math.abs(sz.z * d.z);
+      (levels[lv[i]] = levels[lv[i]] || { ext: 0, items: [] }).items.push(ids); levels[lv[i]].ext = Math.max(levels[lv[i]].ext, ext); });
+    let dist = L0 * 0.6; let prev = null;
+    levels.forEach(L => { if (!L) return; if (prev) dist += Math.max(prev.ext, L.ext) * 0.9 + diag * 0.02; L.items.forEach(ids => ids.forEach(id => offs.set(id, d.clone().multiplyScalar(dist)))); prev = L; });
+    return { offs, main: d.clone().multiplyScalar(dist), lines: true };
+  }
+  // ohne Montagerichtung: sternförmig vom Mittelpunkt des Schritts nach außen
+  const cAll = partsBox(st.parts).getCenter(new THREE.Vector3());
+  groups.forEach((ids, k) => { const v = partsBox(ids).getCenter(new THREE.Vector3()).sub(cAll);
+    if (v.lengthSq() < 1e-6) v.copy(S.meta.upAxis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1)).multiplyScalar(k + 1);
+    v.normalize().multiplyScalar(L0 * 0.8); ids.forEach(id => offs.set(id, v.clone())); });
+  return { offs, main: null, lines: true };
+}
+// „X liegt über Y“: in der Säule über Y (quer zur Montagerichtung gerastert) gibt es Punkte von X oberhalb von Y.
+const fanCache = new Map();
+function fanLevels(st, groups, dir) {
+  const key = dir + '|' + groups.map(g => g.join(',')).join(';');
+  if (fanCache.has(key)) return fanCache.get(key);
+  const ax = dir >> 1, sg = dir % 2 === 0 ? 1 : -1, u = (ax + 1) % 3, v = (ax + 2) % 3;
+  const diag = modelBox.getSize(new THREE.Vector3()).length(), cell = Math.max(diag * 0.004, 0.2), tol = Math.max(diag * 0.0015, 0.1);
+  const cols = groups.map(ids => {             // je Komponente: Rasterzelle → höchster Punkt (in Montagerichtung)
+    const m = new Map();
+    // Flächen abtasten (nicht nur Eckpunkte – große ebene Flächen haben kaum Punkte)
+    const put = (pu, pv, h) => { const k = Math.round(pu / cell) + ':' + Math.round(pv / cell); const o = m.get(k); if (o === undefined || h > o) m.set(k, h); };
+    for (const id of ids) {
+      const g = S.parts[id].geom, a = g.getAttribute('position').array, ix = g.getIndex() ? g.getIndex().array : null;
+      const nt = ix ? ix.length / 3 : a.length / 9; let budget = 400000;
+      for (let t = 0; t < nt && budget > 0; t++) {
+        const i0 = (ix ? ix[t * 3] : t * 3) * 3, i1 = (ix ? ix[t * 3 + 1] : t * 3 + 1) * 3, i2 = (ix ? ix[t * 3 + 2] : t * 3 + 2) * 3;
+        const au = a[i0 + u], av = a[i0 + v], ah = a[i0 + ax] * sg, bu = a[i1 + u] - au, bv = a[i1 + v] - av, bh = a[i1 + ax] * sg - ah, cu = a[i2 + u] - au, cv = a[i2 + v] - av, ch = a[i2 + ax] * sg - ah;
+        const n = Math.min(120, Math.max(1, Math.ceil(Math.max(Math.hypot(bu, bv), Math.hypot(cu, cv), Math.hypot(cu - bu, cv - bv)) / cell)));
+        for (let p = 0; p <= n; p++) for (let q = 0; q <= n - p; q++) { const f = p / n, gq = q / n; put(au + bu * f + cu * gq, av + bv * f + cv * gq, ah + bh * f + ch * gq); }
+        budget -= (n + 1) * (n + 2) / 2;
+      }
+    }
+    return m; });
+  const n = groups.length, over = groups.map(() => []);
+  for (let x = 0; x < n; x++) for (let y = 0; y < n; y++) {
+    if (x === y) continue; let hits = 0;
+    for (const [k, hx] of cols[x]) { const hy = cols[y].get(k); if (hy !== undefined && hx > hy + tol) { if (++hits >= 3) break; } }
+    if (hits >= 3) over[x].push(y);              // X liegt (mindestens stellenweise) über Y
+  }
+  // Ebene = 1 + höchste Ebene der Komponenten darunter (Zyklen werden abgefangen)
+  const lv = new Array(n).fill(-1), busy = new Array(n).fill(false);
+  const level = (x) => { if (lv[x] >= 0) return lv[x]; if (busy[x]) return 0; busy[x] = true; let l = 0; for (const y of over[x]) if (!over[y].includes(x)) l = Math.max(l, level(y) + 1); busy[x] = false; return (lv[x] = l); };
+  for (let x = 0; x < n; x++) level(x);
+  if (fanCache.size > 200) fanCache.clear();
+  fanCache.set(key, lv);
+  return lv;
+}
+const dashMat = new THREE.LineDashedMaterial({ color: 0x5c6470, dashSize: 1, gapSize: 1, transparent: true, opacity: 0.8 });
 function makeArrow(from, dir, len) {
   const diag = modelBox.getSize(new THREE.Vector3()).length();
   const r = Math.max(diag * 0.0035, Math.min(len * 0.035, diag * 0.006));
@@ -1272,11 +1346,11 @@ function applyStep(si) {
   clearWires();
   if (st.kind === 'wire') { arrowGroup.clear(); st._box = applyWireStep(st); markPicked(); needRender = true; return; }
   const placed = placedBefore(si); const now = new Set(st.parts);
-  const off = explodeOffset(si);
+  const po = partOffsets(si), off = po && po.main;
   const baseIds = new Set(S.steps[0]?.parts || []);
   meshes.forEach((m, id) => {
     m.position.set(0, 0, 0); ghostMeshes[id].visible = false;
-    if (now.has(id)) { m.visible = true; m.material = colMat(st.colors?.[id]) || mats.newp; if (off) { m.position.copy(off); ghostMeshes[id].visible = true; } }
+    if (now.has(id)) { m.visible = true; m.material = colMat(st.colors?.[id]) || mats.newp; const o = po && po.offs.get(id); if (o) { m.position.copy(o); ghostMeshes[id].visible = true; } }
     else if (placed.has(id)) {
       const pv = offscreen ? 'show' : (S.meta.placedView || 'show');
       m.visible = pv !== 'hide'; m.material = pv === 'faint' ? mats.faint : baseIds.has(id) ? mats.base : mats.placed;
@@ -1286,10 +1360,21 @@ function applyStep(si) {
   });
   arrowGroup.children.forEach(c => c.children.forEach(x => x.geometry?.dispose()));
   arrowGroup.clear();
-  if (off) {
+  if (off && !po.lines) {
     const c = partsBox(st.parts).getCenter(new THREE.Vector3());
     const len = off.length();
     arrowGroup.add(makeArrow(c.clone().add(off.clone().multiplyScalar(0.92)), off.clone().normalize().negate(), len * 0.8));
+  }
+  if (po && po.lines) {                         // Explosionszeichnung: gestrichelte Montagelinien je Komponente
+    const diag = modelBox.getSize(new THREE.Vector3()).length();
+    dashMat.dashSize = diag * 0.008; dashMat.gapSize = diag * 0.006;
+    for (const ids of fanGroups(st)) {
+      const o = po.offs.get(ids[0]); if (!o || o.lengthSq() < 1e-9) continue;
+      const c = partsBox(ids).getCenter(new THREE.Vector3());
+      const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([c, c.clone().add(o)]), dashMat); ln.computeLineDistances(); arrowGroup.add(ln);
+    }
+    if (off) { const top = partsBox(st.parts).getCenter(new THREE.Vector3()).add(off).add(off.clone().normalize().multiplyScalar(diag * 0.04));
+      arrowGroup.add(makeArrow(top, off.clone().normalize().negate(), Math.min(off.length() * 0.35, diag * 0.08))); }
   }
   needRender = true;
   markPicked();
@@ -1303,7 +1388,7 @@ function autoCam(si, cam, aspect) {
     return { p: sph.center.clone().add(isoDir().multiplyScalar(dist)).toArray(), t: sph.center.toArray(), near: dist / 100, far: dist * 20 };
   }
   const b = st.kind === 'base' ? modelBox.clone() : partsBox(st.parts);
-  const off = explodeOffset(si); if (off) { const nb = partsBox(st.parts); nb.translate(off); b.union(nb); }
+  const po = partOffsets(si); if (po) for (const ids of fanGroups(st)) { const o = po.offs.get(ids[0]); if (o) { const nb = partsBox(ids); nb.translate(o); b.union(nb); } }
   const minR = modelBox.getSize(new THREE.Vector3()).length() * 0.09;
   const sphere = b.getBoundingSphere(new THREE.Sphere());
   const r = Math.max(sphere.radius * (st.kind === 'base' ? 0.92 : 1.15), minR);
@@ -1709,7 +1794,7 @@ function renderWork() {
     <div class="cad-list ${toolHL ? 'tool-on' : ''}" id="cad-list">${multiBar()}${toolBar()}${S.steps.map((s, i) => { const hl = toolHL && hasTool(s, toolHL); return `
       <div class="cad-step ${i === S.sel ? 'sel' : ''} ${hl ? 'tool-hl' : ''} ${stepSel.has(s.uid) ? 'multi' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
         <span class="num">${hl ? `<input type="checkbox" class="tool-chk" data-cad="toolchk" data-uid="${s.uid}" ${toolOff.has(s.uid) ? '' : 'checked'} aria-label="Schritt ${i + 1} mitbündeln">` : ''}${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
-        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${toolsOf(s).length ? `<span class="chip" title="${esc(toolsOf(s).join(', '))}">🔧 ${esc(toolsOf(s)[0].length > 14 ? toolsOf(s)[0].slice(0, 13) + '…' : toolsOf(s)[0])}</span>` : ''}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && s.dir >= 0 ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : '■ eingebaut'}</span>` : ''}</div></div>
+        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${toolsOf(s).length ? `<span class="chip" title="${esc(toolsOf(s).join(', '))}">🔧 ${esc(toolsOf(s)[0].length > 14 ? toolsOf(s)[0].slice(0, 13) + '…' : toolsOf(s)[0])}</span>` : ''}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && (s.dir >= 0 || s.view === 'fan') ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : s.view === 'fan' ? '✳ Explosion' : '■ eingebaut'}</span>` : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
       </div>`; }).join('')}</div>
     <div class="banner" id="cad-gpu" ${gpuLost ? '' : 'hidden'} style="grid-column:1/-1">Der Grafikspeicher reicht für dieses Modell nicht – Bilder und 3D-Ansicht bleiben leer. Bitte „Andere Dateien“ wählen, Detailgrad <b>„Grob“</b> einstellen und die Analyse erneut starten.</div>
@@ -1772,10 +1857,17 @@ function renderIns() {
       <div><label class="f" for="cad-to">Werkzeug</label><input id="cad-to" value="${esc(st.tools)}" placeholder="z. B. Torx TX20"></div>
       <div><label class="f" for="cad-dir">Montagerichtung</label><select id="cad-dir" class="cad-dirsel"><option value="-1">keine</option>${DIRWORD[S.meta.upAxis].map((w, i) => `<option value="${i}" ${st.dir === i ? 'selected' : ''}>${w.replace('von ', 'Von ')}</option>`).join('')}</select></div>
     </div>
-    <div><span class="f" id="cad-vw-l">Bild</span>${st.kind === 'base' || st.dir < 0
-      ? '<div class="tiny">Ohne Montagerichtung wird das Teil in Einbaulage gezeigt.</div>'
-      : `<div class="seg" role="group" aria-labelledby="cad-vw-l"><button class="${showsArrow(st) ? 'on' : ''}" aria-pressed="${showsArrow(st)}" data-cad="view:explode">➜ Mit Pfeil</button><button class="${showsArrow(st) ? '' : 'on'}" aria-pressed="${!showsArrow(st)}" data-cad="view:final">■ Eingebaut</button></div>
-      <div class="tiny" style="margin-top:4px">${st.view ? 'Für diesen Schritt festgelegt.' : 'Folgt dem Schalter „Explosion“ (gilt für alle Schritte).'}</div>`}</div>
+    <div><span class="f" id="cad-vw-l">Bild</span>${(() => {
+      const nG = fanGroups(st).length, cur = st.view || (S.meta.explode ? 'explode' : 'final');
+      const opts = [];
+      if (st.kind !== 'base' && st.dir >= 0) opts.push(['explode', '➜ Mit Pfeil']);
+      if (st.kind !== 'base' && nG >= 2) opts.push(['fan', '✳ Explosionszeichnung']);
+      if (!opts.length) return '<div class="tiny">Ohne Montagerichtung wird das Teil in Einbaulage gezeigt.</div>';
+      opts.push(['final', '■ Eingebaut']);
+      const eff = opts.some(o => o[0] === cur) ? cur : 'final';
+      return `<div class="seg" role="group" aria-labelledby="cad-vw-l">${opts.map(([v, t]) => `<button class="${eff === v ? 'on' : ''}" aria-pressed="${eff === v}" data-cad="view:${v}">${t}</button>`).join('')}</div>
+      <div class="tiny" style="margin-top:4px">${st.view === 'fan' ? 'Die ' + nG + ' Komponenten werden einzeln aufgefächert gezeigt (Baugruppen bleiben zusammen).' : st.view ? 'Für diesen Schritt festgelegt.' : 'Folgt dem Schalter „Explosion“ (gilt für alle Schritte).'}</div>`;
+    })()}</div>
     <div><label class="f" for="cad-no">Wichtiger Hinweis</label><textarea id="cad-no" rows="2" placeholder="z. B. Kabel vorher durchführen, Gewinde sichern">${esc(st.note)}</textarea></div>
   </div>
   <div class="sect" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">Material in diesem Schritt
