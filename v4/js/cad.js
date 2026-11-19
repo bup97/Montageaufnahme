@@ -1172,6 +1172,7 @@ function initThree() {
     src: new THREE.MeshStandardMaterial({ color: 0x2f9e44, metalness: 0.05, roughness: 0.5, emissive: 0x0b2a12 }),
     dst: new THREE.MeshStandardMaterial({ color: 0x1971c2, metalness: 0.05, roughness: 0.5, emissive: 0x061a33 }),
     pick: new THREE.MeshStandardMaterial({ color: 0xffd43b, metalness: 0.05, roughness: 0.45, emissive: 0x5c4a00 }),
+    hover: new THREE.MeshStandardMaterial({ color: 0x22b8cf, metalness: 0.05, roughness: 0.45, emissive: 0x0b3d45 }),
     dim: new THREE.MeshStandardMaterial({ color: 0xc9cfd6, metalness: 0.1, roughness: 0.7, transparent: true, opacity: 0.55, depthWrite: false }),
   };
   arrowMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(ARROW), roughness: 0.45, emissive: 0x06223f });
@@ -1181,6 +1182,10 @@ function initThree() {
   renderer.domElement.addEventListener('pointerup', wirePointerUp);
   renderer.domElement.addEventListener('pointerleave', () => { if (!wireDrag && hoverDot?.visible) showHoverDot(null); });
   renderer.domElement.addEventListener('pointerup', onPick);
+  renderer.domElement.addEventListener('pointermove', onHoverMove);
+  renderer.domElement.addEventListener('pointerleave', () => hoverOff());
+  renderer.domElement.addEventListener('pointerdown', () => hoverOff());
+  renderer.domElement.addEventListener('wheel', () => hoverOff(), { passive: true });
   renderer.domElement.addEventListener('dblclick', e => {
     if (pickMode || !S.analyzed) return;
     const r = renderer.domElement.getBoundingClientRect();
@@ -1413,13 +1418,57 @@ function colMat(hex) {
   return colMats.get(hex);
 }
 let offscreen = false;      // beim Erzeugen von Bildern keine Auswahl-Hervorhebung
-function markPicked() { if (offscreen) return; picked.forEach(id => { const m = meshes[id]; if (m) { m.visible = true; m.material = mats.pick; } }); }
+function markPicked() { if (offscreen) return; picked.forEach(id => { const m = meshes[id]; if (m) { m.visible = true; m.material = mats.pick; } }); rowHover.forEach(id => { const m = meshes[id]; if (m) { m.visible = true; m.material = mats.hover; } }); }
+// ---- Teil unter dem Mauszeiger: kurz hervorheben und Name / Art.-Nr. / Schritt anzeigen ----
+let hoverMesh = null, hoverMat = null, hoverTimer = 0, hoverXY = null;
+const rowHover = new Set();                   // Hervorhebung aus der Materialtabelle
+function hoverOff() {
+  clearTimeout(hoverTimer); hoverXY = null;
+  if (hoverMesh) { hoverMesh.material = hoverMat; hoverMesh = null; needRender = true; }
+  const t = ROOT && $('#cad-tip', ROOT); if (t) t.hidden = true;
+}
+function partInfo(id) {
+  const p = S.parts[id], b = bomOf(p), si = S.steps.findIndex(st => st.parts.includes(id)), u = unitOf(id);
+  return { name: labelOf(p), art: b ? b.art : '', pos: b ? b.pos : '', step: si, unit: u && u.ids.length > 1 ? (u.name || 'Baugruppe') : '', raw: p.clean !== labelOf(p) ? p.clean : '' };
+}
+function onHoverMove(e) {
+  if (e.buttons || wireDrag || (pickMode && pickMode.mode === 'wire') || !S.analyzed) return hoverOff();
+  hoverXY = [e.clientX, e.clientY];
+  clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(hoverNow, 140);       // erst wenn die Maus kurz ruht – spart Rechenzeit bei großen Modellen
+}
+function hoverNow() {
+  if (!hoverXY || !renderer) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const v = new THREE.Vector2(((hoverXY[0] - r.left) / r.width) * 2 - 1, -((hoverXY[1] - r.top) / r.height) * 2 + 1);
+  const rc = new THREE.Raycaster(); rc.setFromCamera(v, camera);
+  const hits = rc.intersectObjects(meshes.filter(m => m.visible && m.material !== mats.faint && m.material !== mats.hover || m === hoverMesh), false);
+  const hit = hits.find(h => h.object.material !== mats.ghost && h.object !== hoverMesh || (h.object === hoverMesh && hoverMat !== mats.ghost)) || null;
+  const m = hit ? hit.object : null;
+  if (m !== hoverMesh) {
+    if (hoverMesh) hoverMesh.material = hoverMat;
+    hoverMesh = m; hoverMat = m ? m.material : null;
+    if (m && m.material !== mats.pick) m.material = mats.hover;
+    needRender = true;
+  }
+  const t = ROOT && $('#cad-tip', ROOT); if (!t) return;
+  if (!m) { t.hidden = true; return; }
+  const I = partInfo(m.userData.id);
+  t.innerHTML = `<b>${esc(I.name)}</b>${I.art ? `<span>Art.-Nr. ${esc(I.art)}${I.pos ? ' · Pos. ' + esc(I.pos) : ''}</span>` : '<span class="muted">ohne Art.-Nr.</span>'}${I.raw ? `<span class="muted">CAD: ${esc(I.raw)}</span>` : ''}<span>${I.step >= 0 ? 'Schritt ' + (I.step + 1) : 'nicht in der Anleitung'}${I.unit ? ' · in 📦 ' + esc(I.unit) : ''}</span>`;
+  const vr = t.parentElement.getBoundingClientRect();
+  t.hidden = false;
+  let x = hoverXY[0] - vr.left + 14, y = hoverXY[1] - vr.top + 16;
+  if (x + t.offsetWidth > vr.width - 6) x = hoverXY[0] - vr.left - t.offsetWidth - 10;
+  if (y + t.offsetHeight > vr.height - 6) y = hoverXY[1] - vr.top - t.offsetHeight - 10;
+  t.style.left = Math.max(4, x) + 'px'; t.style.top = Math.max(4, y) + 'px';
+}
 // Nur für die Ansicht beim Bearbeiten (nicht im Folienbild): einzeln ausgeblendete Teile
 const hiddenParts = new Set();
 const PV_LABEL = { show: 'Verbaute: sichtbar', faint: 'Verbaute: durchsichtig', hide: 'Verbaute: aus' };
 function clearArrows() { arrowGroup.traverse(o => { if (o !== arrowGroup) o.geometry?.dispose(); }); arrowGroup.clear(); }
 function applyStep(si) {
   const st = S.steps[si]; if (!st) return;
+  hoverMesh = null;
   clearWires();
   if (st.kind === 'wire') { clearArrows(); st._box = applyWireStep(st); markPicked(); needRender = true; return; }
   const placed = placedBefore(si); const now = new Set(st.parts);
@@ -1560,7 +1609,11 @@ function onPick(e) {
   const id = hit.object.userData.id;
   const u = !e.altKey && unitOf(id); const grp = u ? u.ids : [id];     // Einheit gemeinsam wählen (Alt + Klick: nur das Einzelteil)
   if (e.ctrlKey || e.metaKey || e.shiftKey) { if (picked.has(id)) grp.forEach(x => picked.delete(x)); else grp.forEach(x => picked.add(x)); }
-  else if (picked.size === grp.length && grp.every(x => picked.has(x))) picked.clear();
+  else if (picked.size === grp.length && grp.every(x => picked.has(x))) {
+    if (grp.length > 1) { picked.clear(); picked.add(id); toast('Einzelteil: ' + labelOf(S.parts[id])); }   // erneut klicken = in die Baugruppe hinein
+    else picked.clear();
+  }
+  else if (picked.size === 1 && picked.has(id)) picked.clear();
   else { picked.clear(); grp.forEach(x => picked.add(x)); }
   applyStep(S.sel); renderPickBox();
 }
@@ -1573,8 +1626,14 @@ function renderPickBox() {
   const ids = [...picked], cur = S.steps[S.sel];
   const where = (id) => { const i = S.steps.findIndex(s => s.parts.includes(id)); return i >= 0 ? 'Schritt ' + (i + 1) : 'nicht verbaut'; };
   const head = ids.length === 1
-    ? (() => { const p = S.parts[ids[0]], b = bomOf(p); return `<b>${esc(labelOf(p))}</b><span class="tiny">${b ? 'Pos. ' + esc(b.pos) + ' · ' + esc(b.art) : 'nicht in der Stückliste zugeordnet'} · ${where(ids[0])}</span>`; })()
-    : `<b>${ids.length} Teile ausgewählt</b><span class="tiny">${esc([...new Set(ids.map(id => labelOf(S.parts[id])))].slice(0, 4).join(', '))}${ids.length > 4 ? ' …' : ''}</span>`;
+    ? (() => { const I = partInfo(ids[0]), u = unitOf(ids[0]); return `<b>${esc(I.name)}</b><span class="tiny">${I.art ? 'Pos. ' + esc(I.pos) + ' · ' + esc(I.art) : 'nicht in der Stückliste zugeordnet'} · ${where(ids[0])}</span>${I.raw ? `<span class="tiny muted">CAD-Name: ${esc(I.raw)}</span>` : ''}${I.unit ? `<span class="tiny">Teil von 📦 ${esc(I.unit)} <button class="btn sm ghost" data-cad="pickunitall" data-id="${ids[0]}" style="min-height:26px;padding:2px 8px">ganze Baugruppe wählen</button></span>` : ''}`; })()
+    : (() => {
+      const u = unitOf(ids[0]), isUnit = u && u.ids.length === ids.length && ids.every(id => u.ids.includes(id));
+      const m = new Map(); ids.forEach(id => { const I = partInfo(id), k = I.name + '|' + I.art; if (!m.has(k)) m.set(k, Object.assign(I, { ids: [] })); m.get(k).ids.push(id); });
+      const rows = [...m.values()].sort((a, b) => a.name.localeCompare(b.name, 'de'));
+      return `<b>${isUnit ? '📦 ' + esc(u.name || 'Baugruppe') : ids.length + ' Teile ausgewählt'}</b><span class="tiny">${isUnit ? (u.art ? 'Art.-Nr. ' + esc(u.art) + ' · ' : '') : ''}${ids.length} Teile · Komponente antippen zum Anzeigen</span>
+        <div class="cmps">${rows.map(r => `<button class="cmp" data-cad="picksub" data-hl="${r.ids.join(',')}" data-ids="${r.ids.join(',')}" title="${esc(r.name)} – im 3D zeigen"><span class="n">${r.ids.length}×</span><span>${esc(r.name)}</span><span class="a">${esc(r.art || '–')}</span></button>`).join('')}</div>`;
+    })();
   const cut = (t) => t.length > 28 ? t.slice(0, 27) + '…' : t;
   const curOk = cur && cur.kind !== 'wire' && !ids.every(id => cur.parts.includes(id));   // schon hier? dann „neuer Schritt“ vorschlagen
   // Zu dem Arbeitsschritt springen, in dem das Teil montiert wird
@@ -1590,7 +1649,7 @@ function renderPickBox() {
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
     <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button><button class="btn sm ghost" data-cad="pickhide" title="Gewählte Teile in der Ansicht ausblenden (nicht im Folienbild)">🙈 Ausblenden</button>${unitsTouching([...picked]).length ? '<button class="btn sm ghost" data-cad="pickdetach" title="Gewählte Teile aus ihrer Baugruppe lösen (Alt + Klick wählt ein Einzelteil)">⤴ Aus Baugruppe lösen</button>' : ''}${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
-    <span class="tiny muted">Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt · H: ausblenden</span>`;
+    <span class="tiny muted">Baugruppe nochmal anklicken: Einzelteil · Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt · H: ausblenden</span>`;
   box.hidden = false;
 }
 // Mehrere Teile auf einmal verschieben; der angezeigte Schritt bleibt gewählt
@@ -1679,7 +1738,11 @@ const STYLE = `
 .cad-legend{position:absolute;left:10px;bottom:14px;font-size:12px;color:var(--ink2);background:rgba(255,255,255,.88);border-radius:8px;padding:4px 8px}
 .cad-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 8px;vertical-align:-1px}
 .cad-pick{position:absolute;right:10px;bottom:62px;width:min(340px,calc(100% - 20px));max-height:calc(100% - 200px);overflow-y:auto;z-index:4;background:#fff;border-radius:12px;box-shadow:var(--shadow);padding:10px 12px;display:grid;gap:2px;font-size:14px;box-sizing:border-box}
-.cad-pick[hidden]{display:none!important}.cad-pick>*{min-width:0}.cad-pick .row{flex-wrap:wrap;gap:6px}.cad-pick .btn{white-space:nowrap}.cad-pick .tiny{white-space:normal;overflow-wrap:anywhere}.cad-pick select{width:100%;min-width:0}
+.cad-pick[hidden]{display:none!important}
+.cad-tip{position:absolute;z-index:5;pointer-events:none;max-width:280px;background:rgba(33,37,41,.92);color:#fff;border-radius:8px;padding:6px 9px;font-size:12.5px;line-height:1.35;display:grid;gap:1px;box-shadow:0 4px 14px rgba(0,0,0,.2)}.cad-tip[hidden]{display:none!important}.cad-tip b{font-size:13.5px}.cad-tip .muted{color:#ced4da}
+.cad-pick .cmp{display:flex;gap:6px;align-items:baseline;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:3px 5px;font:inherit;font-size:13px;cursor:pointer;color:inherit}.cad-pick .cmp:hover{background:#e3fafc}.cad-pick .cmp .n{font-weight:700;min-width:26px}.cad-pick .cmp .a{color:#0057b8;font-size:12px;margin-left:auto;white-space:nowrap}
+.cad-pick .cmps{max-height:180px;overflow-y:auto;margin:4px 0;border:1px solid var(--line);border-radius:8px;padding:2px}
+tr[data-pid]:hover td{background:#e3fafc}.cad-pick>*{min-width:0}.cad-pick .row{flex-wrap:wrap;gap:6px}.cad-pick .btn{white-space:nowrap}.cad-pick .tiny{white-space:normal;overflow-wrap:anywhere}.cad-pick select{width:100%;min-width:0}
 .cad-ptab{width:100%;border-collapse:collapse;font-size:13px}
 .cad-ptab td,.cad-ptab th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 .cad-ptab th{font-size:11.5px;color:var(--ink3);text-transform:uppercase;letter-spacing:.04em}
@@ -1744,8 +1807,23 @@ function isBlank(cv) {
   } catch (e) { return false; }
 }
 
+function setRowHover(ids) {
+  const same = ids.length === rowHover.size && ids.every(x => rowHover.has(x)); if (same) return;
+  rowHover.clear(); ids.forEach(x => { if (S.parts[x]) rowHover.add(x); }); applyStep(S.sel); needRender = true;
+}
+function hlEvents(root) {
+  if (root._cadHl) return; root._cadHl = true;
+  const idsOf = (n) => n.dataset.hl.split(',').map(Number).filter(Number.isFinite);
+  root.addEventListener('mouseover', e => { const n = e.target.closest?.('[data-hl]'); if (n && root.contains(n) && S.analyzed) setRowHover(idsOf(n)); });
+  root.addEventListener('mouseout', e => { const n = e.target.closest?.('[data-hl]'); if (!n) return; const to = e.relatedTarget?.closest?.('[data-hl]'); if (!to && rowHover.size) setRowHover([]); });
+  // Klick auf eine Zeile der Materialtabelle (nicht auf Bedienelemente) → Teil auswählen und Infos zeigen
+  root.addEventListener('click', e => {
+    const n = e.target.closest?.('tr[data-pid] [data-hl], tr[data-pid]'); if (!n || e.target.closest('select,input,button,a,label')) return;
+    const ids = idsOf(n); picked.clear(); ids.forEach(x => picked.add(x)); rowHover.clear(); applyStep(S.sel); renderPickBox();
+  });
+}
 export function mount(root, api) {
-  ROOT = root; API = api; ensureStyle(); render();
+  ROOT = root; API = api; ensureStyle(); hlEvents(root); render();
   if (!root._cadTool) { root._cadTool = true; root.addEventListener('change', e => { if (e.target.id === 'cad-toolhl') { toolHL = e.target.value; toolOff.clear(); renderWork(); } }); }
   if (!root._cadSave) {                       // jede Änderung im Arbeitsbereich automatisch sichern
     root._cadSave = true;
@@ -1896,7 +1974,7 @@ function renderWork() {
       </div>
       <div class="cad-legend"><i style="background:${ACCENT}"></i>neu im Schritt<i style="background:#a9b1ba"></i>bereits montiert<i style="background:${ARROW}"></i>Montagerichtung</div>
       <div class="cad-nav"><button data-cad="prev" aria-label="Vorheriger Schritt">‹</button><span id="cad-pos"></span><button data-cad="next" aria-label="Nächster Schritt">›</button></div>
-      <div class="cad-pick" id="cad-pick" hidden></div>
+      <div class="cad-pick" id="cad-pick" hidden></div><div class="cad-tip" id="cad-tip" hidden></div>
     </div>
     <div class="cad-ins">
       <div class="seg" style="margin-bottom:10px"><button class="${insTab === 'step' ? 'on' : ''}" data-cad="ins:step">Schritt</button><button class="${insTab === 'map' ? 'on' : ''}" data-cad="ins:map">Zuordnung${S.bom && st.unmatched ? ' <span class="n" style="background:var(--warn)">!</span>' : ''}</button><button class="${insTab === 'elec' ? 'on' : ''}" data-cad="ins:elec">⚡ Elektro</button><button class="${insTab === 'opt' ? 'on' : ''}" data-cad="ins:opt">Optionen</button></div>
@@ -1954,7 +2032,7 @@ function renderIns() {
     ${groups.length > 1 || st.colors ? `<span style="flex:1"></span><span class="row" style="gap:4px"><button class="btn sm ghost" data-cad="contrast" style="min-height:30px" title="Jede Teileart in diesem Schritt bekommt eine eigene Farbe">🎨 Kontrastfarben</button>${st.colors ? '<button class="btn sm ghost" data-cad="colreset" style="min-height:30px">↺ Standard</button>' : ''}</span>` : ''}</div>
   <div class="card" style="padding:8px 12px"><table class="cad-ptab"><thead><tr><th title="In der Anleitung zeigen">👁</th><th>Anz.</th><th>Bezeichnung</th><th>Schritt</th></tr></thead><tbody>
     ${mats.filter(r => r.unit).map(r => `<tr class="${r.show ? '' : 'mat-off'}"><td><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td><b>${r.qty}×</b></td><td>📦 ${esc(r.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${r.bom ? esc(r.bom.art) : 'Unterbaugruppe · ohne Art.-Nr.'}</div></td><td class="tiny">als Einheit</td></tr>`).join('')}
-    ${groups.map((g, gi) => { const r = mats.find(x => !x.unit && x.key === groupOf(S.parts[g.ids[0]])) || { show: true, key: '' }; return g.ids.map((id, k) => `<tr class="${r.show ? '' : 'mat-off'}">${k === 0 ? `<td rowspan="${g.ids.length}"><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td rowspan="${g.ids.length}"><b>${g.ids.length}×</b><br><input type="color" class="cad-col" data-gcol="${g.ids.join(',')}" value="${st.colors?.[g.ids[0]] || CONTRAST[0]}" title="Farbe dieser Teile im Bild" aria-label="Farbe für ${esc(g.label)}"></td><td rowspan="${g.ids.length}">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select>${unitsTouching([id]).length ? `<button class="btn sm ghost" data-cad="unitrm" data-id="${id}" style="min-height:28px;margin-top:3px" title="Aus der Baugruppe lösen – eigener Schritt direkt danach">⤴ aus Baugruppe lösen</button>` : ''}</td></tr>`).join(''); }).join('')}
+    ${groups.map((g, gi) => { const r = mats.find(x => !x.unit && x.key === groupOf(S.parts[g.ids[0]])) || { show: true, key: '' }; return g.ids.map((id, k) => `<tr class="${r.show ? '' : 'mat-off'}" data-pid="${id}" data-hl="${id}" title="Zeigen: im 3D hervorheben · Klick: auswählen">${k === 0 ? `<td rowspan="${g.ids.length}"><input type="checkbox" class="mat-vis" data-matvis="${esc(r.key)}" ${r.show ? 'checked' : ''} aria-label="In der Anleitung zeigen"></td><td rowspan="${g.ids.length}"><b>${g.ids.length}×</b><br><input type="color" class="cad-col" data-gcol="${g.ids.join(',')}" value="${st.colors?.[g.ids[0]] || CONTRAST[0]}" title="Farbe dieser Teile im Bild" aria-label="Farbe für ${esc(g.label)}"></td><td rowspan="${g.ids.length}" data-hl="${g.ids.join(',')}" style="cursor:pointer">${esc(g.label)}<div class="tiny" style="color:#0057b8;font-weight:600">${g.bom ? esc(g.bom.art) : 'ohne Art.-Nr.'}</div></td>` : ''}<td><select data-move="${id}" aria-label="Teil verschieben">${stepOpts}</select>${unitsTouching([id]).length ? `<button class="btn sm ghost" data-cad="unitrm" data-id="${id}" style="min-height:28px;margin-top:3px" title="Aus der Baugruppe lösen – eigener Schritt direkt danach">⤴ aus Baugruppe lösen</button>` : ''}</td></tr>`).join(''); }).join('')}
   </tbody></table>${mats.some(r => !r.show) ? `<div class="tiny" style="margin-top:6px">Ausgegraute Zeilen (ohne Häkchen) erscheinen nicht in der Materialliste der Anleitung.</div>` : ''}</div>
   ${(() => { const g = st.main !== undefined && unitList().find(u => u.main === st.main); if (!g) return ''; const ch = (S.meta.children || {})[g.key];
     return `<div class="banner info" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span style="flex:1;min-width:180px">${g.kind === 'user' ? '📦' : '🧩'} <b>${esc(g.name)}</b> ist eine Baugruppe (${g.ids.length} Teile) – in der Stückliste eine Zeile${unitArt(g) ? ' (' + esc(unitArt(g)) + ')' : ''}.</span>
@@ -2089,6 +2167,7 @@ function bindList() {
 }
 function select(i) {
   if (pickMode && pickMode.mode === 'wire') pickMode = null;
+  rowHover.clear(); hoverOff();
   S.sel = Math.max(0, Math.min(S.steps.length - 1, i));
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
   revealSel();
@@ -2842,6 +2921,8 @@ document.addEventListener('click', e => {
     case 'redo': return redo();
     case 'pickmove': { const v = $('#cad-pick-to', ROOT).value; const ids = [...picked]; picked.clear(); return movePartsTo(ids, v.startsWith('new') ? v : +v); }
     case 'pickclose': picked.clear(); applyStep(S.sel); return renderPickBox();
+    case 'picksub': { const ids = el.dataset.ids.split(',').map(Number); picked.clear(); ids.forEach(x => picked.add(x)); rowHover.clear(); applyStep(S.sel); return renderPickBox(); }
+    case 'pickunitall': { const u = unitOf(+el.dataset.id); if (!u) return; picked.clear(); u.ids.forEach(x => picked.add(x)); applyStep(S.sel); return renderPickBox(); }
     case 'placedview': { const order = ['show', 'faint', 'hide']; S.meta.placedView = order[(order.indexOf(S.meta.placedView || 'show') + 1) % 3];
       el.textContent = PV_LABEL[S.meta.placedView]; el.setAttribute('aria-pressed', S.meta.placedView !== 'show'); applyStep(S.sel); return; }
     case 'pickhide': { picked.forEach(id => hiddenParts.add(id)); picked.clear(); renderPickBox(); updateUnhide(); applyStep(S.sel); return; }
