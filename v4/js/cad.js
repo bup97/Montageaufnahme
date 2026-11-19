@@ -1284,34 +1284,59 @@ const fanCache = new Map();
 function fanLevels(st, groups, dir) {
   const key = dir + '|' + groups.map(g => g.join(',')).join(';');
   if (fanCache.has(key)) return fanCache.get(key);
-  const ax = dir >> 1, sg = dir % 2 === 0 ? 1 : -1, u = (ax + 1) % 3, v = (ax + 2) % 3;
-  const diag = modelBox.getSize(new THREE.Vector3()).length(), cell = Math.max(diag * 0.004, 0.2), tol = Math.max(diag * 0.0015, 0.1);
-  const cols = groups.map(ids => {             // je Komponente: Rasterzelle → höchster Punkt (in Montagerichtung)
-    const m = new Map();
-    // Flächen abtasten (nicht nur Eckpunkte – große ebene Flächen haben kaum Punkte)
-    const put = (pu, pv, h) => { const k = Math.round(pu / cell) + ':' + Math.round(pv / cell); const o = m.get(k); if (o === undefined || h > o) m.set(k, h); };
-    for (const id of ids) {
-      const g = S.parts[id].geom, a = g.getAttribute('position').array, ix = g.getIndex() ? g.getIndex().array : null;
-      const nt = ix ? ix.length / 3 : a.length / 9; let budget = 400000;
-      for (let t = 0; t < nt && budget > 0; t++) {
-        const i0 = (ix ? ix[t * 3] : t * 3) * 3, i1 = (ix ? ix[t * 3 + 1] : t * 3 + 1) * 3, i2 = (ix ? ix[t * 3 + 2] : t * 3 + 2) * 3;
-        const au = a[i0 + u], av = a[i0 + v], ah = a[i0 + ax] * sg, bu = a[i1 + u] - au, bv = a[i1 + v] - av, bh = a[i1 + ax] * sg - ah, cu = a[i2 + u] - au, cv = a[i2 + v] - av, ch = a[i2 + ax] * sg - ah;
-        const n = Math.min(120, Math.max(1, Math.ceil(Math.max(Math.hypot(bu, bv), Math.hypot(cu, cv), Math.hypot(cu - bu, cv - bv)) / cell)));
-        for (let p = 0; p <= n; p++) for (let q = 0; q <= n - p; q++) { const f = p / n, gq = q / n; put(au + bu * f + cu * gq, av + bv * f + cv * gq, ah + bh * f + ch * gq); }
-        budget -= (n + 1) * (n + 2) / 2;
+  const n = groups.length, ax = dir >> 1, sg = dir % 2 === 0 ? 1 : -1, u = (ax + 1) % 3, v = (ax + 2) % 3;
+  const K = ['x', 'y', 'z'];
+  const boxes = groups.map(ids => partsBox(ids));
+  const hMin = boxes.map(bx => sg > 0 ? bx.min[K[ax]] : -bx.max[K[ax]]), hMax = boxes.map(bx => sg > 0 ? bx.max[K[ax]] : -bx.min[K[ax]]);
+  const lv = new Array(n).fill(0);
+  if (n > 400) {                                  // sehr viele Komponenten: nur nach Lage in Montagerichtung staffeln
+    const ord = [...Array(n).keys()].sort((x, y) => hMin[x] - hMin[y]); let l = 0, top = -Infinity;
+    for (const i of ord) { if (hMin[i] > top) { if (top > -Infinity) l++; top = hMax[i]; } else top = Math.max(top, hMax[i]); lv[i] = l; }
+  } else {
+    // Raster quer zur Montagerichtung über den ganzen Schritt (fest begrenzt → begrenzter Aufwand)
+    const all = new THREE.Box3(); boxes.forEach(bx => all.union(bx));
+    const R = 128, u0 = all.min[K[u]], v0 = all.min[K[v]];
+    const cu = Math.max((all.max[K[u]] - u0) / R, 1e-6), cv = Math.max((all.max[K[v]] - v0) / R, 1e-6);
+    const tol = Math.max(all.getSize(new THREE.Vector3()).length() * 0.003, 0.05);
+    const cl = (x) => x < 0 ? 0 : x > R - 1 ? R - 1 : x;
+    const rect = boxes.map(bx => { const a0 = cl(Math.floor((bx.min[K[u]] - u0) / cu)), a1 = cl(Math.floor((bx.max[K[u]] - u0) / cu)), b0 = cl(Math.floor((bx.min[K[v]] - v0) / cv)), b1 = cl(Math.floor((bx.max[K[v]] - v0) / cv)); return { a0, a1, b0, b1, w: a1 - a0 + 1 }; });
+    const grids = rect.map(r => new Float32Array(r.w * (r.b1 - r.b0 + 1)).fill(-Infinity));
+    const t0 = performance.now(); let budget = 3e6;
+    groups.forEach((ids, gi) => {
+      const r = rect[gi], G = grids[gi];
+      const put = (pu, pv, h) => { const i = cl(Math.floor((pu - u0) / cu)) - r.a0, j = cl(Math.floor((pv - v0) / cv)) - r.b0; if (i < 0 || j < 0 || i >= r.w || j > r.b1 - r.b0) return; const k = j * r.w + i; if (h > G[k]) G[k] = h; };
+      for (const id of ids) {
+        const g = S.parts[id].geom, a = g.getAttribute('position').array, ix = g.getIndex() ? g.getIndex().array : null;
+        const fast = budget <= 0 || performance.now() - t0 > 600;      // Zeitgrenze: dann nur noch Eckpunkte
+        if (fast) { for (let i = 0; i < a.length; i += 3) put(a[i + u], a[i + v], a[i + ax] * sg); continue; }
+        const nt = ix ? ix.length / 3 : a.length / 9;
+        for (let t = 0; t < nt; t++) {
+          const i0 = (ix ? ix[t * 3] : t * 3) * 3, i1 = (ix ? ix[t * 3 + 1] : t * 3 + 1) * 3, i2 = (ix ? ix[t * 3 + 2] : t * 3 + 2) * 3;
+          const au = a[i0 + u], av = a[i0 + v], ah = a[i0 + ax] * sg, bu = a[i1 + u] - au, bv = a[i1 + v] - av, bh = a[i1 + ax] * sg - ah, du = a[i2 + u] - au, dv = a[i2 + v] - av, dh = a[i2 + ax] * sg - ah;
+          const m = Math.min(48, Math.max(1, Math.ceil(Math.max(Math.abs(bu) / cu, Math.abs(bv) / cv, Math.abs(du) / cu, Math.abs(dv) / cv, Math.abs(du - bu) / cu, Math.abs(dv - bv) / cv))));
+          if (m === 1) { put(au, av, ah); put(au + bu, av + bv, ah + bh); put(au + du, av + dv, ah + dh); budget -= 3; continue; }
+          for (let p = 0; p <= m; p++) for (let q = 0; q <= m - p; q++) { const f = p / m, e = q / m; put(au + bu * f + du * e, av + bv * f + dv * e, ah + bh * f + dh * e); }
+          budget -= (m + 1) * (m + 2) / 2;
+        }
       }
+    });
+    const over = groups.map(() => []);
+    for (let x = 0; x < n; x++) for (let y = 0; y < n; y++) {
+      if (x === y || hMax[x] <= hMin[y] + tol) continue;          // X reicht nirgends über Y hinaus
+      const A = rect[x], B = rect[y], i0 = Math.max(A.a0, B.a0), i1 = Math.min(A.a1, B.a1), j0 = Math.max(A.b0, B.b0), j1 = Math.min(A.b1, B.b1);
+      if (i0 > i1 || j0 > j1) continue;                             // liegen nebeneinander
+      const GX = grids[x], GY = grids[y]; let hits = 0;
+      for (let j = j0; j <= j1 && hits < 3; j++) for (let i = i0; i <= i1; i++) {
+        const hx = GX[(j - A.b0) * A.w + i - A.a0], hy = GY[(j - B.b0) * B.w + i - B.a0];
+        if (hx > hy + tol && hy > -Infinity) { if (++hits >= 3) break; }
+      }
+      if (hits >= 3) over[x].push(y);
     }
-    return m; });
-  const n = groups.length, over = groups.map(() => []);
-  for (let x = 0; x < n; x++) for (let y = 0; y < n; y++) {
-    if (x === y) continue; let hits = 0;
-    for (const [k, hx] of cols[x]) { const hy = cols[y].get(k); if (hy !== undefined && hx > hy + tol) { if (++hits >= 3) break; } }
-    if (hits >= 3) over[x].push(y);              // X liegt (mindestens stellenweise) über Y
+    // Ebene = 1 + höchste Ebene der Komponenten darunter (Zyklen werden abgefangen)
+    const done = new Array(n).fill(false), busy = new Array(n).fill(false);
+    const level = (x) => { if (done[x]) return lv[x]; if (busy[x]) return 0; busy[x] = true; let l = 0; for (const y of over[x]) if (!over[y].includes(x)) l = Math.max(l, level(y) + 1); busy[x] = false; done[x] = true; return (lv[x] = l); };
+    for (let x = 0; x < n; x++) level(x);
   }
-  // Ebene = 1 + höchste Ebene der Komponenten darunter (Zyklen werden abgefangen)
-  const lv = new Array(n).fill(-1), busy = new Array(n).fill(false);
-  const level = (x) => { if (lv[x] >= 0) return lv[x]; if (busy[x]) return 0; busy[x] = true; let l = 0; for (const y of over[x]) if (!over[y].includes(x)) l = Math.max(l, level(y) + 1); busy[x] = false; return (lv[x] = l); };
-  for (let x = 0; x < n; x++) level(x);
   if (fanCache.size > 200) fanCache.clear();
   fanCache.set(key, lv);
   return lv;
@@ -1341,10 +1366,11 @@ function markPicked() { if (offscreen) return; picked.forEach(id => { const m = 
 // Nur für die Ansicht beim Bearbeiten (nicht im Folienbild): einzeln ausgeblendete Teile
 const hiddenParts = new Set();
 const PV_LABEL = { show: 'Verbaute: sichtbar', faint: 'Verbaute: durchsichtig', hide: 'Verbaute: aus' };
+function clearArrows() { arrowGroup.traverse(o => { if (o !== arrowGroup) o.geometry?.dispose(); }); arrowGroup.clear(); }
 function applyStep(si) {
   const st = S.steps[si]; if (!st) return;
   clearWires();
-  if (st.kind === 'wire') { arrowGroup.clear(); st._box = applyWireStep(st); markPicked(); needRender = true; return; }
+  if (st.kind === 'wire') { clearArrows(); st._box = applyWireStep(st); markPicked(); needRender = true; return; }
   const placed = placedBefore(si); const now = new Set(st.parts);
   const po = partOffsets(si), off = po && po.main;
   const baseIds = new Set(S.steps[0]?.parts || []);
@@ -1358,8 +1384,7 @@ function applyStep(si) {
     else { m.visible = S.meta.ghost; m.material = mats.ghost; }
     if (!offscreen && hiddenParts.has(id)) { m.visible = false; ghostMeshes[id].visible = false; }
   });
-  arrowGroup.children.forEach(c => c.children.forEach(x => x.geometry?.dispose()));
-  arrowGroup.clear();
+  clearArrows();
   if (off && !po.lines) {
     const c = partsBox(st.parts).getCenter(new THREE.Vector3());
     const len = off.length();
@@ -1644,7 +1669,7 @@ async function makeThumbs() {
     const st = S.steps[i]; if (!st || thumbs.has(st.uid)) continue;
     let cv;
     try { cv = renderTo(i, 192, 180); } catch (e) { diag(`Bild Schritt ${i + 1}: Fehler ${e.message}`); continue; }
-    if (isBlank(cv)) blankN++; else okN++;
+    if (okN) okN++; else if (isBlank(cv)) blankN++; else okN++;   // Pixel-Prüfung (bremst) nur bis zum ersten Bild mit Inhalt
     thumbs.set(st.uid, cv.toDataURL('image/jpeg', 0.8));
     const li = $(`.cad-step[data-uid="${st.uid}"] img`, ROOT); if (li) li.src = thumbs.get(st.uid);
     if (i % 4 === 3) { applyStep(S.sel); await new Promise(r => setTimeout(r, 0)); }   // Oberfläche bleibt bedienbar
@@ -2661,7 +2686,7 @@ function previewBmk(b) {
   const ids = elecInit().map[b]?.ids || [];
   if (!ids.length && !(pickMode && pickMode.mode === 'partadd')) return;
   meshes.forEach((m, id) => { m.visible = true; m.position.set(0, 0, 0); ghostMeshes[id].visible = false; m.material = ids.includes(id) ? mats.src : mats.dim; });
-  arrowGroup.clear(); clearWires(); needRender = true;
+  clearArrows(); clearWires(); needRender = true;
   clearTimeout(previewBmk.t);
   if (!(pickMode && pickMode.mode === 'partadd')) previewBmk.t = setTimeout(() => showStep(S.sel), 1800);   // beim Sammeln bleibt alles sichtbar
 }
