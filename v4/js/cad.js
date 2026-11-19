@@ -1154,7 +1154,12 @@ function initThree() {
   const d1 = new THREE.DirectionalLight(0xffffff, 1.6); d1.position.set(0.6, 0.9, 1); camera.add(d1);
   const d2 = new THREE.DirectionalLight(0xffffff, 0.6); d2.position.set(-1, -0.4, 0.3); camera.add(d2);
   controls = new OrbitControls(camera, renderer.domElement);
+  if (window.CAD_DEBUG) Object.assign(window.CAD_DEBUG, { camera, controls });
   controls.enableDamping = true; controls.dampingFactor = 0.12;
+  // Eigenes, weiches Zoomen zum Mauszeiger (wie in CAD-Programmen) statt stufenweise zur Bildmitte
+  // (Zwei-Finger-Zoom auf dem Tablet bleibt bei OrbitControls; nur das Mausrad wird hier abgefangen)
+  renderer.domElement.addEventListener('wheel', onZoomWheel, { passive: false, capture: true });
+  ['pointerdown', 'pointermove'].forEach(t => renderer.domElement.addEventListener(t, e => { if (t === 'pointerdown' || e.buttons) lastInteract = performance.now(); }));
   controls.addEventListener('change', () => { needRender = true; });
   arrowGroup = new THREE.Group(); scene.add(arrowGroup);
   mats = {
@@ -1200,9 +1205,38 @@ function initThree() {
     if (!Number.isFinite(camera.position.x + camera.position.y + camera.position.z + controls.target.x + controls.target.y + controls.target.z)) {
       const st = S.steps?.[S.sel]; if (st) { if (st.cam) st.cam = null; try { setCam(camera, autoCam(S.sel, camera, viewAspect()), controls); } catch (e) { } }   // kaputte Kamera reparieren
     }
+    zoomStep();
     if (controls.update() || needRender) { needRender = false; if (wireStepShown()) layoutWireLabels(camera); renderer.render(scene, camera); }
   };
   loop();
+}
+// ---- weiches Zoomen ----
+let zoomLeft = 0, zoomNdc = new THREE.Vector2(), lastInteract = 0;
+function onZoomWheel(e) {
+  if (!camera || wireDrag) return;
+  e.preventDefault(); e.stopImmediatePropagation(); lastInteract = performance.now();
+  let d = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+  d = Math.max(-300, Math.min(300, d));
+  zoomLeft += -d * (e.ctrlKey ? 0.006 : 0.0016);        // log-Faktor; Touchpad-Zoomgeste (Strg) etwas kräftiger
+  zoomLeft = Math.max(-3, Math.min(3, zoomLeft));
+  const r = renderer.domElement.getBoundingClientRect();
+  zoomNdc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+}
+function zoomStep() {
+  if (Math.abs(zoomLeft) < 1e-4) { zoomLeft = 0; return; }
+  const part = Math.abs(zoomLeft) < 0.004 ? zoomLeft : zoomLeft * 0.3;   // weich ausrollen
+  zoomLeft -= part;
+  const s = Math.exp(-part);                                  // < 1 = näher heran
+  const tgt = controls.target, pos = camera.position, dist = pos.distanceTo(tgt);
+  const diag = modelBox ? modelBox.getSize(new THREE.Vector3()).length() || 100 : 100;
+  const nd = dist * s; if ((s < 1 && nd < diag * 0.0004) || (s > 1 && nd > diag * 25)) { zoomLeft = 0; return; }
+  // Punkt unter dem Mauszeiger auf der Ebene durch das Drehzentrum – bleibt beim Zoomen an Ort und Stelle
+  const rc = new THREE.Raycaster(); rc.setFromCamera(zoomNdc, camera);
+  const n = camera.getWorldDirection(new THREE.Vector3()), P = new THREE.Vector3();
+  if (!rc.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(n, tgt), P)) P.copy(tgt);
+  pos.sub(P).multiplyScalar(s).add(P); tgt.sub(P).multiplyScalar(s).add(P);
+  const d2 = pos.distanceTo(tgt); camera.near = Math.max(d2 / 200, diag * 1e-5); camera.far = Math.max(d2 * 20, diag * 4); camera.updateProjectionMatrix();
+  needRender = true;
 }
 function attachViewer(el) {
   initThree();
@@ -1687,12 +1721,13 @@ async function makeThumbs() {
   for (let i = 0; i < S.steps.length; i++) {
     if (run !== thumbRun || !ROOT?.isConnected) return;          // neuer Durchlauf gestartet
     const st = S.steps[i]; if (!st || thumbs.has(st.uid)) continue;
+    while (performance.now() - lastInteract < 700) { await new Promise(r => setTimeout(r, 250)); if (run !== thumbRun || !ROOT?.isConnected) return; }   // nicht beim Drehen/Zoomen stören
     let cv;
     try { cv = renderTo(i, 192, 180); } catch (e) { diag(`Bild Schritt ${i + 1}: Fehler ${e.message}`); continue; }
     if (okN) okN++; else if (isBlank(cv)) blankN++; else okN++;   // Pixel-Prüfung (bremst) nur bis zum ersten Bild mit Inhalt
     thumbs.set(st.uid, cv.toDataURL('image/jpeg', 0.8));
     const li = $(`.cad-step[data-uid="${st.uid}"] img`, ROOT); if (li) li.src = thumbs.get(st.uid);
-    if (i % 4 === 3) { applyStep(S.sel); await new Promise(r => setTimeout(r, 0)); }   // Oberfläche bleibt bedienbar
+    applyStep(S.sel); await new Promise(r => setTimeout(r, 0));   // Oberfläche bleibt bedienbar
   }
   applyStep(S.sel); needRender = true;
   DIAG.thumbs = `${okN} mit Inhalt, ${blankN} leer`;
