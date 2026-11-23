@@ -1454,7 +1454,7 @@ function hoverNow() {
   const t = ROOT && $('#cad-tip', ROOT); if (!t) return;
   if (!m) { t.hidden = true; return; }
   const I = partInfo(m.userData.id);
-  t.innerHTML = `<b>${esc(I.name)}</b>${I.art ? `<span>Art.-Nr. ${esc(I.art)}${I.pos ? ' · Pos. ' + esc(I.pos) : ''}</span>` : '<span class="muted">ohne Art.-Nr.</span>'}${I.raw ? `<span class="muted">CAD: ${esc(I.raw)}</span>` : ''}<span>${I.step >= 0 ? 'Schritt ' + (I.step + 1) : 'nicht in der Anleitung'}${I.unit ? ' · in 📦 ' + esc(I.unit) : ''}</span>`;
+  t.innerHTML = `<b>${esc(I.name)}</b>${I.art ? `<span>Art.-Nr. ${esc(I.art)}${I.pos ? ' · Pos. ' + esc(I.pos) : ''}</span>` : '<span class="muted">ohne Art.-Nr.</span>'}${I.raw ? `<span class="muted">CAD: ${esc(I.raw)}</span>` : ''}<span>${I.step >= 0 ? 'Schritt ' + (I.step + 1) : 'nicht in der Anleitung'}${I.unit ? ' · in 📦 ' + esc(I.unit) : ''}</span>${(() => { const bs = bmksOfPart(m.userData.id); return bs.length ? `<span style="color:#ffd43b">⚡ ${bs.map(b => esc(shortBmk(b)) + (descOf(b) ? ' ' + esc(descOf(b)) : '')).join(', ')}</span>` : ''; })()}`;
   const vr = t.parentElement.getBoundingClientRect();
   t.hidden = false;
   let x = hoverXY[0] - vr.left + 14, y = hoverXY[1] - vr.top + 16;
@@ -1641,7 +1641,8 @@ function renderPickBox() {
   const jump = stepsOf.length === 1 && stepsOf[0] === S.sel ? `<div class="tiny" style="margin-top:4px;color:var(--ok)">✓ wird in diesem Schritt montiert</div>`
     : `<div class="row" style="gap:6px;margin-top:6px;flex-wrap:wrap">${stepsOf.slice(0, 5).map(i => i < 0 ? '<span class="tiny muted">nicht in der Anleitung</span>'
         : `<button class="btn sm primary" data-cad="pickgo" data-i="${i}" title="${esc(S.steps[i].title || '')}">↪ Zu Schritt ${i + 1}</button>`).join('')}${stepsOf.length > 5 ? ' …' : ''}</div>`;
-  box.innerHTML = `${head}${jump}
+  const elFirst = insTab === 'elec';
+  box.innerHTML = `${head}${elFirst ? elecPickSection(ids, true) : ''}${jump}
     <label class="tiny" for="cad-pick-to" style="margin-top:6px">Verschieben nach</label>
     <select id="cad-pick-to">
       ${curOk ? `<option value="${S.sel}">Schritt ${S.sel + 1} (aktuell angezeigt)</option>` : ''}
@@ -1649,8 +1650,60 @@ function renderPickBox() {
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
     <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button><button class="btn sm ghost" data-cad="pickhide" title="Gewählte Teile in der Ansicht ausblenden (nicht im Folienbild)">🙈 Ausblenden</button>${unitsTouching([...picked]).length ? '<button class="btn sm ghost" data-cad="pickdetach" title="Gewählte Teile aus ihrer Baugruppe lösen (Alt + Klick wählt ein Einzelteil)">⤴ Aus Baugruppe lösen</button>' : ''}${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
+    ${elFirst ? '' : elecPickSection(ids)}
     <span class="tiny muted">Baugruppe nochmal anklicken: Einzelteil · Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt · H: ausblenden</span>`;
   box.hidden = false;
+  const inp = $('#cad-pick-bmk', box); if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); assignPickedBmk('set'); } });
+  const det = $('details.el-pick', box); if (det) det.addEventListener('toggle', () => { elPickOpen = det.open; });
+}
+// ---- Elektro: gewählte 3D-Teile direkt einem Betriebsmittelkennzeichen (BMK) zuordnen ----
+function bmksOfPart(id) { const E = elecInit(); return Object.keys(E.map).filter(b => E.map[b].type === 'part' && E.map[b].ids.includes(id)); }
+function allBmks() {
+  const E = elecInit();
+  return [...E.devices.map(d => ({ b: d.bmk, t: (d.desc || 'Gerät') + (d.group ? ' · ' + d.group : '') })), ...E.terminals.map(t => ({ b: t, t: 'Klemmleiste' }))]
+    .filter((x, i, a) => a.findIndex(y => y.b === x.b) === i).sort((x, y) => natCmp(shortBmk(x.b), shortBmk(y.b)));
+}
+function elecPickSection(ids, first) {
+  const E = elecInit(), list = allBmks();
+  const has = [...new Set(ids.flatMap(bmksOfPart))].sort((x, y) => natCmp(shortBmk(x), shortBmk(y)));
+  const opts = list.map(x => { const m = E.map[x.b]; return `<option value="${esc(x.b)}">${esc(shortBmk(x.b) + ' – ' + x.t + (m ? (m.type === 'part' ? ` (✓ ${m.ids.length} Teil${m.ids.length === 1 ? '' : 'e'})` : ' (📍)') : ''))}</option>`; }).join('');
+  return `<details class="el-pick" ${first || elPickOpen || has.length ? 'open' : ''}><summary class="small" style="cursor:pointer;margin-top:6px"><b>⚡ Elektro-Kennzeichen</b>${has.length ? ` · ${has.map(b => esc(shortBmk(b))).join(', ')}` : ''}</summary>
+    ${has.length ? `<div class="row" style="gap:4px;flex-wrap:wrap;margin:4px 0">${has.map(b => `<span class="chip" title="${esc(b + ' ' + descOf(b))}">⚡ ${esc(shortBmk(b))}${descOf(b) ? ' · ' + esc(cutTxt(descOf(b), 18)) : ''}<button data-cad="pickel-rm" data-bmk="${esc(b)}" aria-label="Zuordnung lösen">×</button></span>`).join('')}</div>` : ''}
+    <div class="row" style="gap:6px;margin-top:4px;align-items:stretch">
+      <input id="cad-pick-bmk" list="cad-bmk-l" placeholder="${list.length ? 'Kennzeichen wählen, z. B. M1 oder X8' : 'Kennzeichen eingeben, z. B. M1 oder X8'}" autocomplete="off" style="flex:1;min-width:0">
+      <datalist id="cad-bmk-l">${opts}</datalist>
+    </div>
+    <div class="row" style="gap:6px;margin-top:6px;flex-wrap:wrap"><button class="btn sm primary" data-cad="pickel" data-how="set" title="Kennzeichen bekommt genau die gewählten Teile">Zuordnen</button><button class="btn sm" data-cad="pickel" data-how="add" title="Gewählte Teile zu den bereits zugeordneten Teilen dazunehmen (Block)">＋ dazu nehmen</button></div>
+    ${E.res ? '' : '<span class="tiny muted">Ohne Schaltplan-PDF: neue Kennzeichen werden angelegt (X… = Klemmleiste, sonst Gerät). Verbindungen dann im Reiter ⚡ Elektro.</span>'}
+  </details>`;
+}
+let elPickOpen = false;
+const cutTxt = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t;
+function resolveBmk(txt) {
+  const E = elecInit(); txt = String(txt || '').trim(); if (!txt) return null;
+  const list = allBmks().map(x => x.b);
+  const hit = list.find(b => b === txt) || list.find(b => b.toLowerCase() === txt.toLowerCase());
+  if (hit) return hit;
+  const sh = list.filter(b => shortBmk(b).toLowerCase() === shortBmk(txt).toLowerCase());
+  if (sh.length === 1) return sh[0];
+  if (sh.length > 1) { toast(`„${txt}“ gibt es mehrfach – bitte aus der Liste wählen`); return null; }
+  // neu anlegen
+  if (!E.res) E.res = { pages: 0, textPages: 0 };
+  if (/^X\d/i.test(shortBmk(txt))) E.terminals = [...new Set([...E.terminals, txt])];
+  else E.devices = [...E.devices, { bmk: txt, desc: '' }];
+  toast(`Neues Kennzeichen ${shortBmk(txt)} angelegt`);
+  return txt;
+}
+function assignPickedBmk(how) {
+  const inp = ROOT && $('#cad-pick-bmk', ROOT); const ids = [...picked]; if (!ids.length) return;
+  const b = resolveBmk(inp?.value); if (!b) { if (!inp?.value.trim()) toast('Bitte ein Kennzeichen wählen oder eingeben'); inp?.focus(); return; }
+  histTrack();
+  const E = elecInit(), old = E.map[b];
+  const keep = how === 'add' && old && old.type === 'part' ? old.ids : [];
+  E.map[b] = { type: 'part', ids: [...new Set([...keep, ...ids])] };
+  elPickOpen = true;
+  updateUse(); regenTexts(); thumbs.clear(); scheduleThumbs(); renderIns(); renderPickBox(); applyStep(S.sel);
+  toast(`⚡ ${shortBmk(b)} → ${E.map[b].ids.length === 1 ? labelOf(S.parts[E.map[b].ids[0]]) : E.map[b].ids.length + ' Teile'}`);
 }
 // Mehrere Teile auf einmal verschieben; der angezeigte Schritt bleibt gewählt
 function movePartsTo(ids, to) {
@@ -2888,7 +2941,7 @@ document.addEventListener('click', e => {
     case 'down': return moveStep(+el.dataset.i, +el.dataset.i + 1);
     case 'prev': return select(S.sel - 1);
     case 'next': return select(S.sel + 1);
-    case 'ins': { insTab = x; renderInsTabs(); const ins = $('.cad-ins', ROOT); if (ins) ins.scrollTop = 0; return renderIns(); }
+    case 'ins': { insTab = x; renderInsTabs(); renderPickBox(); const ins = $('.cad-ins', ROOT); if (ins) ins.scrollTop = 0; return renderIns(); }
     case 'explode': S.meta.explode = !S.meta.explode; S.steps.forEach(s => { delete s.view; }); thumbs.clear(); el.setAttribute('aria-pressed', S.meta.explode); renderWork(); return;
     case 'view': { const st = S.steps[S.sel]; st.view = x; thumbs.delete(st.uid); showStep(S.sel); renderWork(); return; }
     case 'ghost': S.meta.ghost = !S.meta.ghost; el.setAttribute('aria-pressed', S.meta.ghost); applyStep(S.sel); return scheduleThumbs();
@@ -2921,6 +2974,8 @@ document.addEventListener('click', e => {
     case 'redo': return redo();
     case 'pickmove': { const v = $('#cad-pick-to', ROOT).value; const ids = [...picked]; picked.clear(); return movePartsTo(ids, v.startsWith('new') ? v : +v); }
     case 'pickclose': picked.clear(); applyStep(S.sel); return renderPickBox();
+    case 'pickel': return assignPickedBmk(el.dataset.how);
+    case 'pickel-rm': { histTrack(); const E = elecInit(), b = el.dataset.bmk, m = E.map[b]; if (!m) return; m.ids = (m.ids || []).filter(x => !picked.has(x)); if (!m.ids.length) delete E.map[b]; elPickOpen = true; updateUse(); regenTexts(); thumbs.clear(); scheduleThumbs(); renderIns(); renderPickBox(); return toast(`Zuordnung zu ${shortBmk(b)} gelöst`); }
     case 'picksub': { const ids = el.dataset.ids.split(',').map(Number); picked.clear(); ids.forEach(x => picked.add(x)); rowHover.clear(); applyStep(S.sel); return renderPickBox(); }
     case 'pickunitall': { const u = unitOf(+el.dataset.id); if (!u) return; picked.clear(); u.ids.forEach(x => picked.add(x)); applyStep(S.sel); return renderPickBox(); }
     case 'placedview': { const order = ['show', 'faint', 'hide']; S.meta.placedView = order[(order.indexOf(S.meta.placedView || 'show') + 1) % 3];
