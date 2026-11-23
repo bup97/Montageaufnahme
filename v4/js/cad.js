@@ -1474,6 +1474,7 @@ function applyStep(si) {
   const placed = placedBefore(si); const now = new Set(st.parts);
   const po = partOffsets(si), off = po && po.main;
   const baseIds = new Set(S.steps[0]?.parts || []);
+  const stepHide = new Set(st.hide || []);      // nur in diesem Schritt ausgeblendet (auch im Folienbild)
   meshes.forEach((m, id) => {
     m.position.set(0, 0, 0); ghostMeshes[id].visible = false;
     if (now.has(id)) { m.visible = true; m.material = colMat(st.colors?.[id]) || mats.newp; const o = po && po.offs.get(id); if (o) { m.position.copy(o); ghostMeshes[id].visible = true; } }
@@ -1482,7 +1483,7 @@ function applyStep(si) {
       m.visible = pv !== 'hide'; m.material = pv === 'faint' ? mats.faint : baseIds.has(id) ? mats.base : mats.placed;
     }
     else { m.visible = S.meta.ghost; m.material = mats.ghost; }
-    if (!offscreen && hiddenParts.has(id)) { m.visible = false; ghostMeshes[id].visible = false; }
+    if ((!offscreen && hiddenParts.has(id)) || stepHide.has(id)) { m.visible = false; ghostMeshes[id].visible = false; }
   });
   clearArrows();
   if (off && !po.lines) {
@@ -1618,7 +1619,21 @@ function onPick(e) {
   applyStep(S.sel); renderPickBox();
 }
 const picked = new Set();
-function updateUnhide() { const b = ROOT && $('#cad-unhide', ROOT); if (b) { b.hidden = !hiddenParts.size; b.textContent = `👁 ${hiddenParts.size} einblenden`; } }
+function updateUnhide() {
+  const b = ROOT && $('#cad-unhide', ROOT); if (b) { b.hidden = !hiddenParts.size; b.textContent = `👁 ${hiddenParts.size} einblenden`; }
+  const c = ROOT && $('#cad-unhide-st', ROOT), n = (S.steps[S.sel]?.hide || []).length; if (c) { c.hidden = !n; c.textContent = `👁 Schritt: ${n} einblenden`; }
+}
+// Ausblenden: nur im angezeigten Schritt (gespeichert, gilt auch fürs Folienbild) oder in allen Schritten (nur Ansicht)
+function hidePicked(where) {
+  if (!picked.size) return;
+  if (where === 'step') {
+    const st = S.steps[S.sel]; if (!st) return;
+    st.hide = [...new Set([...(st.hide || []), ...picked])];
+    thumbs.delete(st.uid); scheduleThumbs(); scheduleSave();
+    toast(`${picked.size} Teil${picked.size === 1 ? '' : 'e'} in Schritt ${S.sel + 1} ausgeblendet`, 'Rückgängig', () => undo());
+  } else { picked.forEach(id => hiddenParts.add(id)); toast(`${picked.size} Teil${picked.size === 1 ? '' : 'e'} in allen Schritten ausgeblendet (nur Ansicht)`); }
+  picked.clear(); if (where === 'step') renderWork(); else { renderPickBox(); updateUnhide(); applyStep(S.sel); }
+}
 function renderPickBox() {
   const box = ROOT && $('#cad-pick', ROOT); if (!box) return;
   [...picked].forEach(id => { if (!S.parts[id]) picked.delete(id); });
@@ -1649,9 +1664,9 @@ function renderPickBox() {
       <optgroup label="Als neuen Schritt"><option value="new:after">→ neuer Schritt nach ${S.sel + 1}</option><option value="new:before">→ neuer Schritt vor ${S.sel + 1}</option><option value="new:end">→ neuer Schritt ganz am Ende</option></optgroup>
       <optgroup label="Zu Schritt hinzufügen">${S.steps.map((st, i) => st.kind === 'wire' || i === S.sel ? '' : `<option value="${i}">Schritt ${i + 1} – ${esc(cut(st.title || ''))}</option>`).join('')}</optgroup>
     </select>
-    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button><button class="btn sm ghost" data-cad="pickhide" title="Gewählte Teile in der Ansicht ausblenden (nicht im Folienbild)">🙈 Ausblenden</button>${unitsTouching([...picked]).length ? '<button class="btn sm ghost" data-cad="pickdetach" title="Gewählte Teile aus ihrer Baugruppe lösen (Alt + Klick wählt ein Einzelteil)">⤴ Aus Baugruppe lösen</button>' : ''}${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
+    <div class="row" style="margin-top:6px;gap:6px"><button class="btn sm primary" data-cad="pickmove">Verschieben</button><button class="btn sm ghost" data-cad="pickclose">Auswahl aufheben</button><button class="btn sm ghost" data-cad="pickhide" data-where="step" title="Nur in diesem Schritt ausblenden – wird gespeichert und gilt auch fürs Folienbild (Taste H)">🙈 Nur in diesem Schritt</button><button class="btn sm ghost" data-cad="pickhide" data-where="all" title="In allen Schritten ausblenden – nur in der Ansicht, nicht im Folienbild (Umschalt + H)">🙈 In allen Schritten</button>${unitsTouching([...picked]).length ? '<button class="btn sm ghost" data-cad="pickdetach" title="Gewählte Teile aus ihrer Baugruppe lösen (Alt + Klick wählt ein Einzelteil)">⤴ Aus Baugruppe lösen</button>' : ''}${picked.size > 1 || unitList().length ? `<button class="btn sm" data-cad="pickunit" title="Neue Baugruppe bilden oder zu einer bestehenden hinzufügen">📦 ${unitList().length ? 'Baugruppe …' : 'Baugruppe bilden'}</button>` : ''}</div>
     ${elFirst ? '' : elecPickSection(ids)}
-    <span class="tiny muted">Baugruppe nochmal anklicken: Einzelteil · Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt · H: ausblenden</span>`;
+    <span class="tiny muted">Baugruppe nochmal anklicken: Einzelteil · Strg + Klick: weitere Teile dazu · Doppelklick: direkt zum Schritt · H: nur hier ausblenden · Umschalt+H: überall</span>`;
   box.hidden = false;
   const inp = $('#cad-pick-bmk', box); if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); assignPickedBmk('set'); } });
   const det = $('details.el-pick', box); if (det) det.addEventListener('toggle', () => { elPickOpen = det.open; });
@@ -1980,7 +1995,7 @@ function revealSel() {
 }
 function refreshSel() {
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
-  revealSel(); renderIns(); updateHead(); showStep(S.sel);
+  revealSel(); renderIns(); updateHead(); showStep(S.sel); updateUnhide();
 }
 // PC: Arbeitsbereich genau in den sichtbaren Bereich einpassen – die Seite selbst muss nicht scrollen,
 // Schrittliste und rechte Spalte scrollen für sich, die 3D-Ansicht bleibt immer ganz zu sehen.
@@ -2005,7 +2020,7 @@ function renderWork() {
     <div class="cad-list ${toolHL ? 'tool-on' : ''}" id="cad-list">${multiBar()}${toolBar()}${S.steps.map((s, i) => { const hl = toolHL && hasTool(s, toolHL); return `
       <div class="cad-step ${i === S.sel ? 'sel' : ''} ${hl ? 'tool-hl' : ''} ${stepSel.has(s.uid) ? 'multi' : ''}" draggable="true" data-i="${i}" data-uid="${s.uid}">
         <span class="num">${hl ? `<input type="checkbox" class="tool-chk" data-cad="toolchk" data-uid="${s.uid}" ${toolOff.has(s.uid) ? '' : 'checked'} aria-label="Schritt ${i + 1} mitbündeln">` : ''}${i + 1}</span><img alt="" src="${thumbs.get(s.uid) || ''}">
-        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${toolsOf(s).length ? `<span class="chip" title="${esc(toolsOf(s).join(', '))}">🔧 ${esc(toolsOf(s)[0].length > 14 ? toolsOf(s)[0].slice(0, 13) + '…' : toolsOf(s)[0])}</span>` : ''}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && (s.dir >= 0 || s.view === 'fan') ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : s.view === 'fan' ? '✳ Explosion' : '■ eingebaut'}</span>` : ''}</div></div>
+        <div style="min-width:0"><div class="t">${esc(s.title)}</div><div class="chips" style="margin-top:3px">${kindChip(s)}${s.kind === 'wire' ? `<span class="chip">${wiresOf(s).length} Ader${wiresOf(s).length === 1 ? '' : 'n'}</span>` : `<span class="chip">${s.parts.length} Teil${s.parts.length === 1 ? '' : 'e'}</span>`}${toolsOf(s).length ? `<span class="chip" title="${esc(toolsOf(s).join(', '))}">🔧 ${esc(toolsOf(s)[0].length > 14 ? toolsOf(s)[0].slice(0, 13) + '…' : toolsOf(s)[0])}</span>` : ''}${s.cam ? '<span class="chip">📷 Ansicht</span>' : ''}${s.hide?.length ? `<span class="chip" title="In diesem Schritt ausgeblendete Teile">🙈 ${s.hide.length}</span>` : ''}${s.view && s.kind !== 'wire' && s.kind !== 'base' && (s.dir >= 0 || s.view === 'fan') ? `<span class="chip">${s.view === 'explode' ? '➜ Pfeil' : s.view === 'fan' ? '✳ Explosion' : '■ eingebaut'}</span>` : ''}</div></div>
         <div class="mv"><button data-cad="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Nach oben">▲</button><button data-cad="down" data-i="${i}" ${i === S.steps.length - 1 ? 'disabled' : ''} aria-label="Nach unten">▼</button></div>
       </div>`; }).join('')}</div>
     <div class="banner" id="cad-gpu" ${gpuLost ? '' : 'hidden'} style="grid-column:1/-1">Der Grafikspeicher reicht für dieses Modell nicht – Bilder und 3D-Ansicht bleiben leer. Bitte „Andere Dateien“ wählen, Detailgrad <b>„Grob“</b> einstellen und die Analyse erneut starten.</div>
@@ -2017,7 +2032,8 @@ function renderWork() {
           <button class="cad-tg" data-cad="explode" aria-pressed="${S.meta.explode}" title="Pfeilansicht für alle Schritte ein/aus – einzelne Schritte rechts unter „Bild“ umstellen">Explosion</button>
           <button class="cad-tg" data-cad="ghost" aria-pressed="${S.meta.ghost}">Folgeteile</button>
           <button class="cad-tg" data-cad="placedview" aria-pressed="${(S.meta.placedView || 'show') !== 'show'}" title="Bereits verbaute Teile durchsichtig machen oder ausblenden – z. B. um unter Abdeckungen zu sehen (nur in der Ansicht, nicht im Folienbild)">${PV_LABEL[S.meta.placedView || 'show']}</button>
-          <button class="cad-tg" data-cad="unhide" id="cad-unhide" ${hiddenParts.size ? '' : 'hidden'} title="Ausgeblendete Teile wieder zeigen">👁 ${hiddenParts.size} einblenden</button>
+          <button class="cad-tg" data-cad="unhide-st" id="cad-unhide-st" ${(S.steps[S.sel]?.hide || []).length ? '' : 'hidden'} title="Die nur in diesem Schritt ausgeblendeten Teile wieder zeigen">👁 Schritt: ${(S.steps[S.sel]?.hide || []).length} einblenden</button>
+          <button class="cad-tg" data-cad="unhide" id="cad-unhide" ${hiddenParts.size ? '' : 'hidden'} title="In allen Schritten ausgeblendete Teile wieder zeigen">👁 ${hiddenParts.size} einblenden</button>
           <button class="cad-tg" data-cad="camsave">Ansicht merken</button>
           <button class="cad-tg" data-cad="camauto">Auto</button>
           <button class="cad-tg" data-cad="frame" aria-pressed="${S.meta.frame !== false}" title="Rahmen zeigen, welcher Ausschnitt aufs Folienbild kommt">▭ Folie</button>
@@ -2223,7 +2239,7 @@ function select(i) {
   rowHover.clear(); hoverOff();
   S.sel = Math.max(0, Math.min(S.steps.length - 1, i));
   $$('.cad-step', ROOT).forEach(li => li.classList.toggle('sel', +li.dataset.i === S.sel));
-  revealSel();
+  revealSel(); updateUnhide();
   if (insTab !== 'step') insTab = 'step';
   renderInsTabs(); renderIns(); updateHead(); showStep(S.sel); renderPickBox();
 }
@@ -2980,7 +2996,8 @@ document.addEventListener('click', e => {
     case 'pickunitall': { const u = unitOf(+el.dataset.id); if (!u) return; picked.clear(); u.ids.forEach(x => picked.add(x)); applyStep(S.sel); return renderPickBox(); }
     case 'placedview': { const order = ['show', 'faint', 'hide']; S.meta.placedView = order[(order.indexOf(S.meta.placedView || 'show') + 1) % 3];
       el.textContent = PV_LABEL[S.meta.placedView]; el.setAttribute('aria-pressed', S.meta.placedView !== 'show'); applyStep(S.sel); return; }
-    case 'pickhide': { picked.forEach(id => hiddenParts.add(id)); picked.clear(); renderPickBox(); updateUnhide(); applyStep(S.sel); return; }
+    case 'pickhide': return hidePicked(el.dataset.where || 'all');
+    case 'unhide-st': { const st = S.steps[S.sel]; if (!st) return; delete st.hide; thumbs.delete(st.uid); scheduleThumbs(); scheduleSave(); renderWork(); return; }
     case 'unhide': hiddenParts.clear(); updateUnhide(); applyStep(S.sel); return;
     case 'pickgo': { const i = +el.dataset.i; picked.clear(); renderPickBox(); return select(i); }
     case 'reseq': {
@@ -3017,9 +3034,9 @@ document.addEventListener('keydown', e => {
   const inField = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
   if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'z') { e.preventDefault(); return e.shiftKey ? redo() : undo(); }
   if ((e.ctrlKey || e.metaKey) && !inField && e.key.toLowerCase() === 'y') { e.preventDefault(); return redo(); }
-  if (!inField && !e.ctrlKey && !e.metaKey && (e.key === 'h' || e.key === 'H')) {   // H: gewählte Teile ausblenden, Umschalt+H: alle wieder zeigen
-    if (e.shiftKey) { hiddenParts.clear(); } else if (picked.size) { picked.forEach(id => hiddenParts.add(id)); picked.clear(); renderPickBox(); } else return;
-    updateUnhide(); applyStep(S.sel); return;
+  if (!inField && !e.ctrlKey && !e.metaKey && (e.key === 'h' || e.key === 'H')) {   // H: nur in diesem Schritt ausblenden, Umschalt+H: in allen Schritten
+    if (!picked.size) return;
+    e.preventDefault(); return hidePicked(e.shiftKey ? 'all' : 'step');
   }
   if (e.key === 'Escape' && stepSel.size && !inField) { stepSel.clear(); return markSteps(); }
   if (e.key === 'Escape' && picked.size) { picked.clear(); applyStep(S.sel); return renderPickBox(); }
