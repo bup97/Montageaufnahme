@@ -1,7 +1,7 @@
 /* Funkwerk Montage-Recorder V4 – Oberfläche und Abläufe */
 'use strict';
 
-const VERSION = '5.8.15';
+const VERSION = '5.8.16';
 window.APP_VERSION = VERSION;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -857,7 +857,9 @@ async function importPptx(file) {
     const pre = { area: i.productionArea, type: i.funkwerkType || 'endmontage', customer: i.customer, product: i.product, variant: i.variant };
     const st = res.stats;
     const note = `✓ Erkannt: ${st.steps} Schritt${st.steps !== 1 ? 'e' : ''}, ${st.photos} Foto${st.photos !== 1 ? 's' : ''}` +
-      (st.labels ? `, ${st.labels} Label-Folie${st.labels !== 1 ? 'n' : ''} (erzeugt die App selbst)` : '') + (st.skipped ? ` · ${st.skipped} Folie(n) ohne passendes Layout übersprungen` : '');
+      (st.labels ? `, ${st.labels} Label-Folie${st.labels !== 1 ? 'n' : ''} (erzeugt die App selbst)` : '') + (st.skipped ? ` · ${st.skipped} Folie(n) ohne passendes Layout übersprungen` : '') +
+      (st.composed ? ` · ${st.composed} Foto${st.composed !== 1 ? 's' : ''} mit Markierungen/Zuschnitt wie auf der Folie übernommen` : '') +
+      (st.badFmt ? ` · ⚠ nicht lesbares Bildformat (${st.badFmt}) – diese Bilder in PowerPoint per Rechtsklick „Als Grafik speichern…“ als PNG ablegen und im Schritt neu einfügen` : '');
     await renderHomeData();
     const r = await projectForm(pre, 'PowerPoint importieren', 'Importieren', note);
     if (!r) return;
