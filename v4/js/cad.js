@@ -396,6 +396,39 @@ async function analyze() {
     $('#cad-go', ROOT).disabled = false;
   }
 }
+// Gleiche Teile mit durchnummerierten Namen („…ISO7380-2-5“, „…-2-7“, „Halter<3>“, „Clip (2)“) zusammenfassen –
+// aber nur, wenn die Teile auch geometrisch gleich sind (gleiche Dreiecke, gleiche Oberfläche). So bleiben z. B.
+// verschieden lange Kabel mit fortlaufender Nummer getrennt.
+const RX_INST = /(?:\s*[-.:#]\s*|\s+|\s*<\s*|\s*\(\s*)\d{1,4}\s*[>)]?$/;
+function partSig(p) {
+  if (p._sig) return p._sig;
+  const a = p.geom.getAttribute('position').array, ix = p.geom.getIndex() ? p.geom.getIndex().array : null;
+  const nt = ix ? ix.length / 3 : a.length / 9; let area = 0;
+  for (let t = 0; t < nt; t++) {
+    const i0 = (ix ? ix[t * 3] : t * 3) * 3, i1 = (ix ? ix[t * 3 + 1] : t * 3 + 1) * 3, i2 = (ix ? ix[t * 3 + 2] : t * 3 + 2) * 3;
+    const ux = a[i1] - a[i0], uy = a[i1 + 1] - a[i0 + 1], uz = a[i1 + 2] - a[i0 + 2], vx = a[i2] - a[i0], vy = a[i2 + 1] - a[i0 + 1], vz = a[i2 + 2] - a[i0 + 2];
+    area += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+  }
+  return (p._sig = { nt, area });
+}
+function mergeInstanceNames() {
+  const by = new Map();
+  S.parts.forEach(p => { const base = p.clean.replace(RX_INST, '').trim(); if (base && base !== p.clean && base.length >= 3) { if (!by.has(base)) by.set(base, []); by.get(base).push(p); } });
+  // Teile, die schon genau den Grundnamen tragen, gehören auch dazu
+  S.parts.forEach(p => { if (by.has(p.clean)) by.get(p.clean).push(p); });
+  let n = 0;
+  for (const [base, list] of by) {
+    if (list.length < 2) continue;
+    const used = new Set();
+    for (const p of list) {
+      if (used.has(p)) continue;
+      const sp = partSig(p), same = list.filter(q => !used.has(q) && (() => { const sq = partSig(q); return sq.nt === sp.nt && Math.abs(sq.area - sp.area) <= Math.max(sp.area, sq.area) * 0.002 + 1e-6; })());
+      if (same.length < 2) continue;
+      same.forEach(q => { used.add(q); if (q.clean !== base) { q.clean = base; n++; } });
+    }
+  }
+  if (n) diag(`${n} durchnummerierte Teile zusammengefasst`);
+}
 function buildParts(res) {
   disposeScene();
   S.parts = res.parts.map(p => {
@@ -406,7 +439,8 @@ function buildParts(res) {
     g.computeBoundingBox();
     return { id: p.id, name: p.name, clean: cleanName(p.name), asm: p.asm || [], geom: g, box: g.boundingBox.clone() };
   });
-  stripAsm();
+  stripAsm(); mergeInstanceNames();
+  if (typeof window !== 'undefined' && window.CAD_DEBUG) Object.assign(window.CAD_DEBUG, { S, mergeInstanceNames, stepGroups });
   const rn = res.rootName || '';
   const segs = rn.split('_'); const last = segs.length > 1 ? segs[segs.length - 1] : '';
   if (/\d{3,}/.test(last)) { S.meta.title = segs.slice(0, -1).join('_').trim(); S.meta.art = last.trim(); }
@@ -847,7 +881,7 @@ async function resumeSession(id) {
       geo.setIndex(new THREE.BufferAttribute(idx, 1)); geo.computeBoundingBox();
       return { id: p.id, name: p.name, clean: cleanName(p.name), asm: p.asm || [], geom: geo, box: geo.boundingBox.clone() };
     });
-    stripAsm();
+    stripAsm(); mergeInstanceNames();
     Object.assign(S.meta, st.meta);
     S.bom = st.bom; S.match = st.match || {}; S.boxVol = st.boxVol || []; S.warnings = st.warnings || []; S.loadInfo = st.loadInfo; S.detail = st.detail || 'auto';
     S.contacts = new Map((st.contacts || []).map(([k, v]) => [k, new Set(v)]));
